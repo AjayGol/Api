@@ -1,9 +1,11 @@
 export { AssociatedGroupRepo } from "./AssociatedGroupRepo.js";
 export { GroupMemberRepo } from "./GroupMemberRepo.js";
+export { GroupMemberHistoryRepo } from "./GroupMemberHistoryRepo.js";
 export { GroupJoinRequestRepo } from "./GroupJoinRequestRepo.js";
 export { GroupRepo } from "./GroupRepo.js";
 export { HouseholdRepo } from "./HouseholdRepo.js";
 export { ListRepo } from "./ListRepo.js";
+export { ListMemberRepo } from "./ListMemberRepo.js";
 export { PersonRepo } from "./PersonRepo.js";
 export { AnswerRepo } from "./AnswerRepo.js";
 export { FormRepo } from "./FormRepo.js";
@@ -14,6 +16,7 @@ export { Repos } from "./Repos.js";
 
 export { AccessLogRepo } from "./AccessLogRepo.js";
 export { AuditLogRepo } from "./AuditLogRepo.js";
+export { CampusRepo } from "./CampusRepo.js";
 export { ChurchRepo } from "./ChurchRepo.js";
 export { DomainRepo } from "./DomainRepo.js";
 export { RoleRepo } from "./RoleRepo.js";

@@ -39,13 +39,16 @@ export class Permissions extends BasePermissions {
 
   static registrations = { view: { contentType: "Registrations", action: "View" }, edit: { contentType: "Registrations", action: "Edit" } };
 
+  // Conflict-Resolver role: approve/reject event and room/resource requests without full content-edit rights
+  static calendars = { admin: { contentType: "Calendars", action: "Admin" } };
+
   // Messaging API permissions (to be defined during migration)
   static messaging = { view: { contentType: "Messaging", action: "View" }, edit: { contentType: "Messaging", action: "Edit" }, admin: { contentType: "Messaging", action: "Admin" } };
 
   static texting = { send: { contentType: "Texting", action: "Send" } };
 
-  // Doing API permissions (to be defined during migration)
-  static doing = { view: { contentType: "Doing", action: "View" }, edit: { contentType: "Doing", action: "Edit" }, admin: { contentType: "Doing", action: "Admin" } };
+  // DoingApi service permissions — contentType is "Tasks" (covers Tasks, Workflows & Automations)
+  static tasks = { view: { contentType: "Tasks", action: "View" }, edit: { contentType: "Tasks", action: "Edit" }, admin: { contentType: "Tasks", action: "Admin" } };
 
   // General admin permissions
   static admin = { editSettings: { contentType: "Admin", action: "Edit Settings" } };
@@ -72,7 +75,6 @@ export const permissionsList: IPermission[] = [
   // Membership API permissions
   { apiName: "MembershipApi", section: "Forms", action: "Admin", displaySection: "Forms and Plans", displayAction: "Form Admin" },
   { apiName: "MembershipApi", section: "Forms", action: "Edit", displaySection: "Forms and Plans", displayAction: "Edit Forms" },
-  { apiName: "MembershipApi", section: "Plans", action: "Edit", displaySection: "Forms and Plans", displayAction: "Edit Plans" },
   { apiName: "MembershipApi", section: "Group Members", action: "Edit", displaySection: "People and Groups", displayAction: "Edit Group Members" },
   { apiName: "MembershipApi", section: "Groups", action: "Edit", displaySection: "People and Groups", displayAction: "Edit Groups" },
   { apiName: "MembershipApi", section: "Households", action: "Edit", displaySection: "People and Groups", displayAction: "Edit Households" },
@@ -92,9 +94,18 @@ export const permissionsList: IPermission[] = [
   { apiName: "ContentApi", section: "Chat", action: "Host", displaySection: "Content", displayAction: "Host Chat" },
   { apiName: "ContentApi", section: "Registrations", action: "View", displaySection: "Content", displayAction: "View Registrations" },
   { apiName: "ContentApi", section: "Registrations", action: "Edit", displaySection: "Content", displayAction: "Edit Registrations" },
+  { apiName: "ContentApi", section: "Calendars", action: "Admin", displaySection: "Content", displayAction: "Resolve Calendar Conflicts & Approvals" },
 
   // Messaging API permissions
   { apiName: "MessagingApi", section: "Texting", action: "Send", displaySection: "Messaging", displayAction: "Send Text Messages" },
+
+  // Doing API permissions (Tasks, Workflows & Automations)
+  // Plans lives here because PlanAuth enforces it in the doing module; the
+  // MembershipApi JWT only sees it via UserHelper.syncCrossModulePermissions.
+  { apiName: "DoingApi", section: "Plans", action: "Edit", displaySection: "Forms and Plans", displayAction: "Edit Plans" },
+  { apiName: "DoingApi", section: "Tasks", action: "View", displaySection: "Tasks", displayAction: "View Workflows & Cards" },
+  { apiName: "DoingApi", section: "Tasks", action: "Edit", displaySection: "Tasks", displayAction: "Edit All Cards & Tasks" },
+  { apiName: "DoingApi", section: "Tasks", action: "Admin", displaySection: "Tasks", displayAction: "Manage Workflows & Automations" },
 
   // Lessons API permissions
   { apiName: "LessonsApi", section: "Schedules", action: "Edit", displaySection: "Lessons", displayAction: "Edit Schedules" },
@@ -111,7 +122,7 @@ export interface IPermission {
 
 export type ApiName = "MembershipApi" | "GivingApi" | "AttendanceApi" | "MessagingApi" | "DoingApi" | "ContentApi" | "LessonsApi";
 
-export type DisplaySection = "People and Groups" | "Donations" | "Attendance" | "Forms and Plans" | "Content" | "Messaging" | "Lessons";
+export type DisplaySection = "People and Groups" | "Donations" | "Attendance" | "Forms and Plans" | "Content" | "Messaging" | "Lessons" | "Tasks";
 
 export type ContentType =
   | "Roles"
@@ -133,10 +144,11 @@ export type ContentType =
   | "Domain"
   | "Server"
   | "Messaging"
-  | "Doing"
+  | "Tasks"
   | "Admin"
   | "Texting"
   | "Registrations"
-  | "Schedules";
+  | "Schedules"
+  | "Calendars";
 
 export type Actions = "Admin" | "Edit" | "View" | "Send" | "Edit Self" | "View Members" | "View Summary" | "Checkin" | "Host" | "Edit Settings";

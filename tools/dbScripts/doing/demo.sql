@@ -18,25 +18,18 @@ BEGIN
     TRUNCATE TABLE plans;
     TRUNCATE TABLE planTypes;
     TRUNCATE TABLE positions;
+    TRUNCATE TABLE schedulingPreferences;
     TRUNCATE TABLE times;
     TRUNCATE TABLE tasks;
     TRUNCATE TABLE conditions;
-    TRUNCATE TABLE automations;
-    TRUNCATE TABLE actions;
+    TRUNCATE TABLE workflows;
+    TRUNCATE TABLE workflowSteps;
+    TRUNCATE TABLE workflowStepRoutes;
+    TRUNCATE TABLE workflowCategories;
+    TRUNCATE TABLE workflowTriggers;
+    TRUNCATE TABLE workflowStepActions;
+    TRUNCATE TABLE automationExecutions;
     SET FOREIGN_KEY_CHECKS = 1;
-
-    -- Create automation for birthday cards (must be created before tasks that reference it)
-    INSERT INTO automations (id, churchId, title, recurs, active) VALUES
-    ('AUT00000001', 'CHU00000001', 'Birthday Card Automation', 'Daily', b'1');
-
-    -- Create conditions for the birthday automation
-    INSERT INTO conditions (id, churchId, conjunctionId, field, fieldData, operator, value, label) VALUES
-    ('CON00000001', 'CHU00000001', 'AUT00000001', 'status', '{"type": "member"}', 'equals', 'Active', 'Member Status is Active'),
-    ('CON00000002', 'CHU00000001', 'AUT00000001', 'age', '{"type": "member"}', 'greaterThan', '18', 'Member Age is over 18');
-
-    -- Create actions for the birthday automation
-    INSERT INTO actions (id, churchId, automationId, actionType, actionData) VALUES
-    ('ACT00000001', 'CHU00000001', 'AUT00000001', 'CreateTask', '{"assignedTo": "PER00000069", "title": "Send Birthday Card to {memberName}", "description": "Send birthday card to {memberName} for their birthday on {birthday}. Address: {address}", "dueDate": "{birthday}", "daysBeforeDue": 7, "sortOrder": 1}');
 
     -- Create Plan Types
     INSERT INTO planTypes (id, churchId, ministryId, name) VALUES
@@ -76,9 +69,15 @@ BEGIN
     ('TIM00000001', 'CHU00000001', NULL, 'Sunday Morning Service', 
      DATE_ADD(DATE_ADD(CURDATE(), INTERVAL (7 - DAYOFWEEK(CURDATE())) DAY), INTERVAL 10 HOUR), 
      DATE_ADD(DATE_ADD(CURDATE(), INTERVAL (7 - DAYOFWEEK(CURDATE())) DAY), INTERVAL 11.5 HOUR), 'Worship,Technical'),
-    ('TIM00000002', 'CHU00000001', NULL, 'Thursday Practice', 
-     DATE_ADD(DATE_ADD(CURDATE(), INTERVAL (5 - DAYOFWEEK(CURDATE())) DAY), INTERVAL 19 HOUR), 
-     DATE_ADD(DATE_ADD(CURDATE(), INTERVAL (5 - DAYOFWEEK(CURDATE())) DAY), INTERVAL 21 HOUR), 'Worship,Technical');
+    ('TIM00000002', 'CHU00000001', NULL, 'Thursday Practice',
+     DATE_ADD(DATE_ADD(CURDATE(), INTERVAL (5 - DAYOFWEEK(CURDATE())) DAY), INTERVAL 19 HOUR),
+     DATE_ADD(DATE_ADD(CURDATE(), INTERVAL (5 - DAYOFWEEK(CURDATE())) DAY), INTERVAL 21 HOUR), 'Worship,Technical'),
+    -- Service time tied to PLA00000001 with a start time but NO end time — mirrors
+    -- churches that only set a service start. Exercises the Accept/Decline button
+    -- gating on the plan-detail Overview tab (discussion #863).
+    ('TIM00000003', 'CHU00000001', 'PLA00000001', 'Sunday Service',
+     DATE_ADD(DATE_ADD(CURDATE(), INTERVAL (7 - DAYOFWEEK(CURDATE())) DAY), INTERVAL 10 HOUR),
+     NULL, 'Worship,Technical');
 
     -- Create Worship Plans
     -- PLA00000001 — upcoming Sunday (covers status-stats / hero card scenarios)
@@ -184,18 +183,107 @@ BEGIN
 
     -- Pastoral Care Tasks
     ('TSK00000006', 'CHU00000001', 6, 'Care', DATE_SUB(NOW(), INTERVAL 1 DAY), NULL, 'Person', 'PER00000003', 'Sarah Thompson', 'Person', 'PER00000068', 'Kevin Martin', 'Person', 'PER00000027', 'Michael Davis', 'Visit Hospitalized Member', 'Pending', NULL, NULL, CONCAT('{"description": "Visit Sarah Thompson at City General Hospital", "dueDate": "', DATE_FORMAT(DATE_ADD(CURDATE(), INTERVAL 1 DAY), '%Y-%m-%d'), '"}')),
-    ('TSK00000007', 'CHU00000001', 7, 'Care', DATE_SUB(NOW(), INTERVAL 1 DAY), NULL, 'Person', 'PER00000004', 'James Wilson', 'Person', 'PER00000069', 'Rachel Martin', 'Person', 'PER00000027', 'Michael Davis', 'Follow-up Prayer Request', 'Pending', NULL, NULL, CONCAT('{"description": "Call back regarding prayer request from James Wilson", "dueDate": "', DATE_FORMAT(DATE_ADD(CURDATE(), INTERVAL 2 DAY), '%Y-%m-%d'), '"}')),
-
-    -- Birthday Card Tasks
-    ('TSK00000008', 'CHU00000001', 8, 'Automation', DATE_SUB(NOW(), INTERVAL 6 DAY), NULL, 'Person', 'PER00000028', 'Emily Davis', 'Automation', 'AUT00000001', 'Birthday Card Automation', 'Person', 'PER00000069', 'Rachel Martin', 'Send Birthday Card to Emily Davis', 'Pending', 'AUT00000001', NULL, CONCAT('{"description": "Send birthday card to Emily Davis for their upcoming birthday. Address: 123 Main St, Anytown, USA", "dueDate": "', DATE_FORMAT(DATE_ADD(CURDATE(), INTERVAL 12 DAY), '%Y-%m-%d'), '"}')),
-    ('TSK00000009', 'CHU00000001', 9, 'Automation', DATE_SUB(NOW(), INTERVAL 6 DAY), NULL, 'Person', 'PER00000029', 'Michael Wilson', 'Automation', 'AUT00000001', 'Birthday Card Automation', 'Person', 'PER00000069', 'Rachel Martin', 'Send Birthday Card to Michael Wilson', 'Pending', 'AUT00000001', NULL, CONCAT('{"description": "Send birthday card to Michael Wilson for their upcoming birthday. Address: 456 Oak Ave, Anytown, USA", "dueDate": "', DATE_FORMAT(DATE_ADD(CURDATE(), INTERVAL 17 DAY), '%Y-%m-%d'), '"}'));
+    ('TSK00000007', 'CHU00000001', 7, 'Care', DATE_SUB(NOW(), INTERVAL 1 DAY), NULL, 'Person', 'PER00000004', 'James Wilson', 'Person', 'PER00000069', 'Rachel Martin', 'Person', 'PER00000027', 'Michael Davis', 'Follow-up Prayer Request', 'Pending', NULL, NULL, CONCAT('{"description": "Call back regarding prayer request from James Wilson", "dueDate": "', DATE_FORMAT(DATE_ADD(CURDATE(), INTERVAL 2 DAY), '%Y-%m-%d'), '"}'));
 
     -- ========================================
-    -- Conjunctions (Boolean logic for automation conditions)
+    -- Workflows / Cards (Planning-Center-style pipelines)
     -- ========================================
-    INSERT INTO conjunctions (id, churchId, automationId, parentId, groupType) VALUES
-    ('CNJ00000001', 'CHU00000001', 'AUT00000001', NULL, 'AND'),
-    ('CNJ00000002', 'CHU00000001', 'AUT00000001', 'CNJ00000001', 'OR');
+    INSERT INTO workflowCategories (id, churchId, name, sort) VALUES
+    ('WFC00000001', 'CHU00000001', 'Assimilation', 1);
+
+    INSERT INTO workflows (id, churchId, name, categoryId, active, sort) VALUES
+    ('WFL00000001', 'CHU00000001', 'New Visitor Follow-up', 'WFC00000001', b'1', 1),
+    ('WFL00000002', 'CHU00000001', 'Membership Class', NULL, b'1', 2),
+    ('WFL00000003', 'CHU00000001', 'Visit Follow-up', NULL, b'1', 3),
+    -- WFL4 "Birthday Greetings" — a single-step workflow fed by a SCHEDULED rule
+    -- (the unified replacement for the old birthday automation; see workflowTriggers below).
+    ('WFL00000004', 'CHU00000001', 'Birthday Greetings', NULL, b'1', 4);
+
+    -- Steps. The "Call" step on the first workflow sets a 3-day expected response
+    -- so new cards entering it pick up a due date.
+    INSERT INTO workflowSteps (id, churchId, workflowId, name, sort, defaultAssignToType, defaultAssignToId, defaultAssignToLabel, expectedResponseDays) VALUES
+    ('WFS00000001', 'CHU00000001', 'WFL00000001', 'Greet', 1, NULL, NULL, NULL, 2),
+    ('WFS00000002', 'CHU00000001', 'WFL00000001', 'Call', 2, 'person', 'PER00000027', 'Michael Davis', 3),
+    ('WFS00000003', 'CHU00000001', 'WFL00000001', 'Connect to Group', 3, NULL, NULL, NULL, NULL),
+    ('WFS00000004', 'CHU00000001', 'WFL00000002', 'Invited', 1, NULL, NULL, NULL, NULL),
+    ('WFS00000005', 'CHU00000001', 'WFL00000002', 'Attended', 2, NULL, NULL, NULL, NULL),
+    -- WFL00000003 "Visit Follow-up" — dedicated to exercising outcome routing.
+    ('WFS00000006', 'CHU00000001', 'WFL00000003', 'Contact', 1, NULL, NULL, NULL, NULL),
+    ('WFS00000007', 'CHU00000001', 'WFL00000003', 'Scheduled', 2, NULL, NULL, NULL, NULL),
+    -- WFL00000004 "Birthday Greetings" — single step, default-assigned to Rachel Martin.
+    ('WFS00000008', 'CHU00000001', 'WFL00000004', 'Send Card', 1, 'person', 'PER00000069', 'Rachel Martin', 7);
+
+    -- Cards = tasks carrying a workflowId. status 'Open' so the board renders them.
+    -- TSK101 normal, TSK102 overdue (past dueDate), TSK103 snoozed, TSK104 assigned
+    -- to the demo user (PER00000082) for the "My Cards" view, TSK105 on the 2nd workflow.
+    INSERT INTO tasks (id, churchId, taskNumber, taskType, dateCreated, associatedWithType, associatedWithId, associatedWithLabel, createdByType, createdByLabel, assignedToType, assignedToId, assignedToLabel, title, status, workflowId, stepId, dueDate, snoozedUntil, sort) VALUES
+    ('TSK00000101', 'CHU00000001', 101, 'card', DATE_SUB(NOW(), INTERVAL 1 DAY), 'person', 'PER00000001', 'John Smith', 'system', 'System', 'person', 'PER00000027', 'Michael Davis', 'John Smith', 'Open', 'WFL00000001', 'WFS00000001', DATE_ADD(NOW(), INTERVAL 2 DAY), NULL, 1),
+    ('TSK00000102', 'CHU00000001', 102, 'card', DATE_SUB(NOW(), INTERVAL 6 DAY), 'person', 'PER00000002', 'Maria Rodriguez', 'system', 'System', 'person', 'PER00000027', 'Michael Davis', 'Maria Rodriguez', 'Open', 'WFL00000001', 'WFS00000001', DATE_SUB(NOW(), INTERVAL 2 DAY), NULL, 2),
+    ('TSK00000103', 'CHU00000001', 103, 'card', DATE_SUB(NOW(), INTERVAL 3 DAY), 'person', 'PER00000003', 'Sarah Thompson', 'system', 'System', 'person', 'PER00000027', 'Michael Davis', 'Sarah Thompson', 'Open', 'WFL00000001', 'WFS00000002', DATE_ADD(NOW(), INTERVAL 1 DAY), DATE_ADD(NOW(), INTERVAL 3 DAY), 1),
+    ('TSK00000104', 'CHU00000001', 104, 'card', DATE_SUB(NOW(), INTERVAL 2 DAY), 'person', 'PER00000004', 'James Wilson', 'system', 'System', 'person', 'PER00000082', 'Demo User', 'James Wilson', 'Open', 'WFL00000001', 'WFS00000003', NULL, NULL, 1),
+    ('TSK00000105', 'CHU00000001', 105, 'card', DATE_SUB(NOW(), INTERVAL 1 DAY), 'person', 'PER00000005', 'Patricia Brown', 'system', 'System', 'person', 'PER00000069', 'Rachel Martin', 'Patricia Brown', 'Open', 'WFL00000002', 'WFS00000004', NULL, NULL, 1);
+
+    -- Birthday Greetings cards (stamped with the scheduled rule's triggerId WKT00000004).
+    INSERT INTO tasks (id, churchId, taskNumber, taskType, dateCreated, associatedWithType, associatedWithId, associatedWithLabel, createdByType, createdByLabel, assignedToType, assignedToId, assignedToLabel, title, status, workflowId, stepId, triggerId, dueDate, snoozedUntil, sort) VALUES
+    ('TSK00000008', 'CHU00000001', 8, 'card', DATE_SUB(NOW(), INTERVAL 6 DAY), 'person', 'PER00000028', 'Emily Davis', 'system', 'System', 'person', 'PER00000069', 'Rachel Martin', 'Emily Davis', 'Open', 'WFL00000004', 'WFS00000008', 'WKT00000004', DATE_ADD(NOW(), INTERVAL 7 DAY), NULL, 1),
+    ('TSK00000009', 'CHU00000001', 9, 'card', DATE_SUB(NOW(), INTERVAL 6 DAY), 'person', 'PER00000029', 'Michael Wilson', 'system', 'System', 'person', 'PER00000069', 'Rachel Martin', 'Michael Wilson', 'Open', 'WFL00000004', 'WFS00000008', 'WKT00000004', DATE_ADD(NOW(), INTERVAL 7 DAY), NULL, 2);
+
+    -- Unified workflow triggers (event-driven). A new person who is (or becomes) a
+    -- Visitor is dropped on WFL1 "New Visitor Follow-up" (oncePerSubject keeps repeated
+    -- edits from re-adding). The third is a form-submission trigger — form submissions
+    -- run through the same engine via the form.submission.created event.
+    INSERT INTO workflowTriggers (id, churchId, name, triggerKind, eventType, workflowId, stepId, conditions, oncePerSubject, active) VALUES
+    ('WKT00000001', 'CHU00000001', 'New Visitor Follow-up (created)', 'event', 'person.created', 'WFL00000001', NULL, '{"type":"group","conjunction":"AND","children":[{"type":"condition","field":"person.membershipStatus","operator":"=","value":"Visitor"}]}', b'1', b'1'),
+    ('WKT00000002', 'CHU00000001', 'New Visitor Follow-up (status change)', 'event', 'person.updated', 'WFL00000001', NULL, '{"type":"group","conjunction":"AND","children":[{"type":"condition","field":"person.membershipStatus","operator":"=","value":"Visitor"}]}', b'1', b'1'),
+    ('WKT00000003', 'CHU00000001', 'Visitor Card Form Submission', 'event', 'form.submission.created', 'WFL00000001', NULL, '{"type":"group","conjunction":"AND","children":[{"type":"condition","field":"formSubmission.formId","operator":"=","value":"FRM00000001"}]}', b'0', b'1');
+
+    -- A SCHEDULED rule (the pull path): recurring yearly, it adds matching members to the
+    -- Birthday Greetings workflow. Its conditions are the relational tree below (owned by
+    -- triggerId), not inline JSON — that's how scheduled rules differ from event rules.
+    INSERT INTO workflowTriggers (id, churchId, name, triggerKind, recurs, workflowId, stepId, conditions, oncePerSubject, active) VALUES
+    ('WKT00000004', 'CHU00000001', 'Birthday Greetings (scheduled)', 'schedule', 'yearly', 'WFL00000004', 'WFS00000008', NULL, b'1', b'1');
+
+    -- ========================================
+    -- Conditional routing ("if this then that")
+    -- ========================================
+    -- Outcome buttons on the Visit Follow-up "Contact" step (WFS6): "Reached" advances
+    -- the card to "Scheduled" (WFS7); "Not Interested" has no target, so it closes the card.
+    -- An automatic (personMatch) route on the Membership Class "Invited" step (WFS4):
+    -- anyone whose last name is "Smith" is auto-advanced to "Attended" (WFS5) on entry.
+    -- WSR4 is a cross-workflow hand-off: "Connect to Group" (WFS3) -> "Membership Class" (WFL2).
+    INSERT INTO workflowStepRoutes (id, churchId, workflowId, stepId, sort, `trigger`, kind, label, targetStepId, targetWorkflowId) VALUES
+    ('WSR00000001', 'CHU00000001', 'WFL00000003', 'WFS00000006', 1, 'onComplete', 'outcome', 'Reached', 'WFS00000007', NULL),
+    ('WSR00000002', 'CHU00000001', 'WFL00000003', 'WFS00000006', 2, 'onComplete', 'outcome', 'Not Interested', NULL, NULL),
+    ('WSR00000003', 'CHU00000001', 'WFL00000002', 'WFS00000004', 1, 'onEnter', 'personMatch', NULL, 'WFS00000005', NULL),
+    ('WSR00000004', 'CHU00000001', 'WFL00000001', 'WFS00000003', 1, 'onComplete', 'outcome', 'Enroll in Class', NULL, 'WFL00000002');
+
+    -- Condition tree for the personMatch route (lastName = 'Smith').
+    INSERT INTO conjunctions (id, churchId, stepRouteId, parentId, groupType) VALUES
+    ('CNJ00000010', 'CHU00000001', 'WSR00000003', NULL, 'and');
+    INSERT INTO conditions (id, churchId, conjunctionId, field, fieldData, operator, value, label) VALUES
+    ('CON00000010', 'CHU00000001', 'CNJ00000010', 'lastName', '{}', '=', 'Smith', 'Last name is Smith');
+
+    -- Dedicated cards on the Visit Follow-up "Contact" step (WFS6) for exercising
+    -- the outcome buttons (isolated from TSK101-105 which other tests mutate).
+    INSERT INTO tasks (id, churchId, taskNumber, taskType, dateCreated, associatedWithType, associatedWithId, associatedWithLabel, createdByType, createdByLabel, assignedToType, assignedToId, assignedToLabel, title, status, workflowId, stepId, dueDate, snoozedUntil, sort) VALUES
+    ('TSK00000106', 'CHU00000001', 106, 'card', DATE_SUB(NOW(), INTERVAL 1 DAY), 'person', 'PER00000006', 'Linda Davis', 'system', 'System', 'person', 'PER00000027', 'Michael Davis', 'Linda Davis', 'Open', 'WFL00000003', 'WFS00000006', NULL, NULL, 1),
+    ('TSK00000107', 'CHU00000001', 107, 'card', DATE_SUB(NOW(), INTERVAL 1 DAY), 'person', 'PER00000007', 'Robert Miller', 'system', 'System', 'person', 'PER00000027', 'Michael Davis', 'Robert Miller', 'Open', 'WFL00000003', 'WFS00000006', NULL, NULL, 2);
+
+    -- Card for exercising the cross-workflow hand-off (WSR4); PER6 isn't a "Smith" so it won't auto-advance.
+    INSERT INTO tasks (id, churchId, taskNumber, taskType, dateCreated, associatedWithType, associatedWithId, associatedWithLabel, createdByType, createdByLabel, assignedToType, assignedToId, assignedToLabel, title, status, workflowId, stepId, dueDate, snoozedUntil, sort) VALUES
+    ('TSK00000108', 'CHU00000001', 108, 'card', DATE_SUB(NOW(), INTERVAL 1 DAY), 'person', 'PER00000006', 'Handoff Tester', 'system', 'System', 'person', 'PER00000027', 'Michael Davis', 'Handoff Tester', 'Open', 'WFL00000001', 'WFS00000003', NULL, NULL, 2);
+
+    -- ========================================
+    -- Condition tree for the scheduled Birthday Greetings rule (owned by triggerId WKT4).
+    -- ========================================
+    INSERT INTO conjunctions (id, churchId, triggerId, parentId, groupType) VALUES
+    ('CNJ00000020', 'CHU00000001', 'WKT00000004', NULL, 'AND');
+    INSERT INTO conditions (id, churchId, conjunctionId, field, fieldData, operator, value, label) VALUES
+    ('CON00000020', 'CHU00000001', 'CNJ00000020', 'membershipStatus', '{}', '=', 'Member', 'Membership Status is Member');
+
+    -- Single-site demo church: assign every plan to the Main Campus
+    -- (id matches membership.campuses / attendance.campuses Main Campus).
+    UPDATE plans SET campusId = 'CAM00000001' WHERE churchId = 'CHU00000001';
 
 END //
 DELIMITER ;

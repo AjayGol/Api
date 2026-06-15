@@ -4,6 +4,7 @@ export class Group {
   public categoryName?: string;
   public name?: string;
   public trackAttendance?: boolean;
+  public attendanceReminders?: boolean;
   public parentPickup?: false;
   public printNametag?: boolean;
   public about?: string;
@@ -14,6 +15,7 @@ export class Group {
   public labels?: string;
   public labelArray?: string[];
   public slug?: string;
+  public campusId?: string;
 
   public joinPolicy?: "open" | "request" | "closed";
 

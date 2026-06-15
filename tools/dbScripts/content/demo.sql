@@ -21,6 +21,11 @@ BEGIN
     TRUNCATE TABLE curatedEvents;
     TRUNCATE TABLE curatedCalendars;
     TRUNCATE TABLE eventExceptions;
+    TRUNCATE TABLE eventBookings;
+    TRUNCATE TABLE calendarBlockouts;
+    TRUNCATE TABLE eventTemplates;
+    TRUNCATE TABLE rooms;
+    TRUNCATE TABLE resources;
     TRUNCATE TABLE events;
     TRUNCATE TABLE arrangementKeys;
     TRUNCATE TABLE arrangements;
@@ -318,8 +323,8 @@ BEGIN
 
     -- Pages
     INSERT INTO pages (id, churchId, url, title, layout) VALUES
-    ('PAG00000001', 'CHU00000001', '/', 'Home', 'default'),
-    ('PAG00000002', 'CHU00000001', '/ministries', 'Ministries', 'default');
+    ('PAG00000001', 'CHU00000001', '/', 'Home', 'headerFooter'),
+    ('PAG00000002', 'CHU00000001', '/ministries', 'Ministries', 'headerFooter');
 
     -- Sections (Home Page)
     INSERT INTO sections (id, churchId, pageId, blockId, zone, background, textColor, headingColor, linkColor, sort, targetBlockId, answersJSON, stylesJSON, animationsJSON) VALUES

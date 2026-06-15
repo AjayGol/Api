@@ -7,15 +7,18 @@ BEGIN
 -- Truncate all tables in correct order to respect foreign key constraints
 TRUNCATE TABLE visitSessions;
 TRUNCATE TABLE visits;
+TRUNCATE TABLE labelTemplates;
 TRUNCATE TABLE sessions;
 TRUNCATE TABLE groupServiceTimes;
 TRUNCATE TABLE serviceTimes;
 TRUNCATE TABLE services;
 TRUNCATE TABLE campuses;
 
--- Demo Campus
-INSERT INTO campuses (id, churchId, name, removed) VALUES 
-('CAM00000001', 'CHU00000001', 'Main Campus', 0);
+-- Campuses are mastered in the membership module (membership.campuses); the
+-- attendance copy is frozen/deprecated and intentionally left EMPTY so the demo
+-- reproduces a real church that never set up campuses in attendance. Services
+-- below reference campusId 'CAM00000001', which resolves against the membership
+-- campus seeded in membership/demo.sql.
 
 -- Demo Services
 INSERT INTO services (id, churchId, campusId, name, removed) VALUES 

@@ -1,10 +1,12 @@
 import {
   AssociatedGroupRepo,
   GroupMemberRepo,
+  GroupMemberHistoryRepo,
   GroupJoinRequestRepo,
   GroupRepo,
   HouseholdRepo,
   ListRepo,
+  ListMemberRepo,
   PersonRepo,
   AnswerRepo,
   FormRepo,
@@ -24,15 +26,17 @@ import {
   WebhookDeliveryRepo,
   ApiKeyRepo
 } from "./index.js";
-import { UserRepo, ChurchRepo, RoleRepo, RoleMemberRepo, RolePermissionRepo, UserChurchRepo, AccessLogRepo, AuditLogRepo } from "./index.js";
+import { UserRepo, ChurchRepo, RoleRepo, RoleMemberRepo, RolePermissionRepo, UserChurchRepo, AccessLogRepo, AuditLogRepo, CampusRepo } from "./index.js";
 
 export class Repos {
   public associatedGroup: AssociatedGroupRepo;
   public groupMember: GroupMemberRepo;
+  public groupMemberHistory: GroupMemberHistoryRepo;
   public groupJoinRequest: GroupJoinRequestRepo;
   public group: GroupRepo;
   public household: HouseholdRepo;
   public list: ListRepo;
+  public listMember: ListMemberRepo;
   public person: PersonRepo;
   public answer: AnswerRepo;
   public form: FormRepo;
@@ -41,6 +45,7 @@ export class Repos {
   public memberPermission: MemberPermissionRepo;
 
   public accessLog: AccessLogRepo;
+  public campus: CampusRepo;
   public church: ChurchRepo;
   public domain: DomainRepo;
   public role: RoleRepo;
@@ -70,10 +75,12 @@ export class Repos {
   constructor() {
     this.associatedGroup = new AssociatedGroupRepo();
     this.groupMember = new GroupMemberRepo();
+    this.groupMemberHistory = new GroupMemberHistoryRepo();
     this.groupJoinRequest = new GroupJoinRequestRepo();
     this.group = new GroupRepo();
     this.household = new HouseholdRepo();
     this.list = new ListRepo();
+    this.listMember = new ListMemberRepo();
     this.person = new PersonRepo();
     this.answer = new AnswerRepo();
     this.form = new FormRepo();
@@ -82,6 +89,7 @@ export class Repos {
     this.memberPermission = new MemberPermissionRepo();
 
     this.accessLog = new AccessLogRepo();
+    this.campus = new CampusRepo();
     this.church = new ChurchRepo();
     this.domain = new DomainRepo();
     this.role = new RoleRepo();

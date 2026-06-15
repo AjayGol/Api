@@ -88,6 +88,8 @@ export class FormSubmissionController extends MembershipBaseController {
               }
 
               results.push(savedSubmissions);
+              // Submitters land in workflows via the unified trigger engine, which
+              // subscribes to this event (form.submission.created) on the internal bus.
               await WebhookDispatcher.emit(churchId, "form.submission.created", savedSubmissions);
 
               await this.sendEmails(formSubmission, form, churchId);

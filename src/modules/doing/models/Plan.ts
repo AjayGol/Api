@@ -2,6 +2,7 @@ export class Plan {
   public id?: string;
   public churchId?: string;
   public ministryId?: string;
+  public campusId?: string;
   public planTypeId?: string;
   public name?: string;
   public serviceDate?: Date;
@@ -14,4 +15,7 @@ export class Plan {
   public providerPlanName?: string;
   public signupDeadlineHours?: number;
   public showVolunteerNames?: boolean;
+  public prepared?: boolean;
+  public autoReplaceOnDecline?: boolean;
+  public lastAutofillRunId?: string;
 }

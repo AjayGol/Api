@@ -18,17 +18,26 @@ BEGIN
     TRUNCATE TABLE users;
     TRUNCATE TABLE userChurches;
     TRUNCATE TABLE groupMembers;
+    TRUNCATE TABLE groupMemberHistory;
+    TRUNCATE TABLE lists;
+    TRUNCATE TABLE listMembers;
     TRUNCATE TABLE associatedGroups;
     TRUNCATE TABLE notes;
     TRUNCATE TABLE `groups`;
     TRUNCATE TABLE people;
     TRUNCATE TABLE households;
     TRUNCATE TABLE churches;
+    TRUNCATE TABLE campuses;
     SET FOREIGN_KEY_CHECKS = 1;
 
 -- Demo Church
-INSERT INTO churches (id, name, subDomain, address1, city, state, zip, country, latitude, longitude) VALUES 
+INSERT INTO churches (id, name, subDomain, address1, city, state, zip, country, latitude, longitude) VALUES
 ('CHU00000001', 'Grace Community Church', 'grace', '123 Main Street', 'Springfield', 'IL', '62701', 'US', 39.7817, -89.6501);
+
+-- Demo Campus (church-wide; id matches the attendance Main Campus so the two
+-- lists line up, mirroring tools/manual/campus-reconcile.sql).
+INSERT INTO campuses (id, churchId, name, address1, city, state, zip, timezone, removed) VALUES
+('CAM00000001', 'CHU00000001', 'Main Campus', '123 Main Street', 'Springfield', 'IL', '62701', 'America/Chicago', 0);
 
 -- Demo Households (25 households)
 INSERT INTO households (id, churchId, name) VALUES 
@@ -393,7 +402,7 @@ INSERT INTO groupMembers (id, churchId, groupId, personId, joinDate, leader) VAL
 ('GME00000083', 'CHU00000001', 'GRP00000029', 'PER00000056', '2024-01-01', 1), -- Christopher Thomas (Financial Peace leader)
 ('GME00000084', 'CHU00000001', 'GRP00000029', 'PER00000057', '2024-01-01', 0), -- Amanda Thomas
 ('GME00000085', 'CHU00000001', 'GRP00000029', 'PER00000068', '2024-01-01', 0), -- Kevin Martin
-('GME00000086', 'CHU00000001', 'GRP00000029', 'PER00000069', '2024-01-01', 0), -- Rachel Martin
+('GME00000086', 'CHU00000001', 'GRP00000029', 'PER00000069', '2024-01-01', 1), -- Rachel Martin (Financial Peace leader; used by event-permissions Playwright test)
 
 -- Special Events (VBS)
 ('GME00000087', 'CHU00000001', 'GRP00000030', 'PER00000003', '2024-01-01', 0), -- James Smith
@@ -464,6 +473,25 @@ INSERT INTO userChurches (id, userId, churchId, personId) VALUES
 -- exercise cross-user realtime tests (e.g. two staff on the same person's notes tab).
 INSERT INTO roleMembers (id, churchId, roleId, userId, dateAdded) VALUES
 ('RME00000003', 'CHU00000001', 'ROL00000001', 'USR00000003', '2024-01-01 00:00:00');
+
+-- Workflow Volunteer: a NON-domain-admin user with only DoingApi/Tasks/View.
+-- Used by serving-workflows tests to exercise the "Edit Assigned Cards" permission
+-- tier — they can view the board and work cards assigned to them, but not others.
+-- Linked to PER00000069 (Rachel Martin), who is the assignee of card TSK00000105.
+INSERT INTO roles (id, churchId, name) VALUES
+('ROL00000010', 'CHU00000001', 'Workflow Volunteer');
+
+INSERT INTO rolePermissions (id, churchId, roleId, apiName, contentType, action) VALUES
+('RPM00000010', 'CHU00000001', 'ROL00000010', 'DoingApi', 'Tasks', 'View');
+
+INSERT INTO users (id, email, password, displayName, firstName, lastName, registrationDate) VALUES
+('USR00000010', 'volunteer@b1.church', '$2a$10$qBWddIw2QMUlRrX9/6Cdz.nW.L5FqE45R1NTLF.V71LyhjY6I0lFu', 'Rachel Martin', 'Rachel', 'Martin', '2024-01-01 00:00:00');
+
+INSERT INTO userChurches (id, userId, churchId, personId) VALUES
+('UCH00000010', 'USR00000010', 'CHU00000001', 'PER00000069');
+
+INSERT INTO roleMembers (id, churchId, roleId, userId, dateAdded) VALUES
+('RME00000010', 'CHU00000001', 'ROL00000010', 'USR00000010', '2024-01-01 00:00:00');
 
 -- Add Demo User Family to Groups
 INSERT INTO groupMembers (id, churchId, groupId, personId, joinDate, leader) VALUES
@@ -555,20 +583,20 @@ INSERT INTO forms (id, churchId, name, contentType, createdTime, modifiedTime, r
 -- ========================================
 INSERT INTO questions (id, churchId, formId, parentId, title, description, fieldType, placeholder, sort, choices, removed, required) VALUES
 -- Visitor Information Card
-('QST00000001', 'CHU00000001', 'FRM00000001', NULL, 'First Name', NULL, 'textField', 'Enter first name', 1, NULL, b'0', b'1'),
-('QST00000002', 'CHU00000001', 'FRM00000001', NULL, 'Last Name', NULL, 'textField', 'Enter last name', 2, NULL, b'0', b'1'),
-('QST00000003', 'CHU00000001', 'FRM00000001', NULL, 'Email Address', NULL, 'textField', 'Enter email', 3, NULL, b'0', b'1'),
-('QST00000004', 'CHU00000001', 'FRM00000001', NULL, 'Phone Number', NULL, 'textField', 'Enter phone', 4, NULL, b'0', b'0'),
-('QST00000005', 'CHU00000001', 'FRM00000001', NULL, 'How did you hear about us?', NULL, 'dropdown', NULL, 5, 'Friend or Family,Online Search,Social Media,Drive By,Community Event,Other', b'0', b'0'),
+('QST00000001', 'CHU00000001', 'FRM00000001', NULL, 'First Name', NULL, 'Textbox', 'Enter first name', 1, NULL, b'0', b'1'),
+('QST00000002', 'CHU00000001', 'FRM00000001', NULL, 'Last Name', NULL, 'Textbox', 'Enter last name', 2, NULL, b'0', b'1'),
+('QST00000003', 'CHU00000001', 'FRM00000001', NULL, 'Email Address', NULL, 'Textbox', 'Enter email', 3, NULL, b'0', b'1'),
+('QST00000004', 'CHU00000001', 'FRM00000001', NULL, 'Phone Number', NULL, 'Textbox', 'Enter phone', 4, NULL, b'0', b'0'),
+('QST00000005', 'CHU00000001', 'FRM00000001', NULL, 'How did you hear about us?', NULL, 'Multiple Choice', NULL, 5, '[{"value":"Friend or Family","text":"Friend or Family"},{"value":"Online Search","text":"Online Search"},{"value":"Social Media","text":"Social Media"},{"value":"Drive By","text":"Drive By"},{"value":"Community Event","text":"Community Event"},{"value":"Other","text":"Other"}]', b'0', b'0'),
 -- VBS Registration
-('QST00000006', 'CHU00000001', 'FRM00000002', NULL, 'Child''s Full Name', NULL, 'textField', 'Enter child name', 1, NULL, b'0', b'1'),
-('QST00000007', 'CHU00000001', 'FRM00000002', NULL, 'Child''s Age', NULL, 'textField', 'Enter age', 2, NULL, b'0', b'1'),
-('QST00000008', 'CHU00000001', 'FRM00000002', NULL, 'Allergies or Special Needs', 'Please list any allergies or special needs we should know about.', 'textArea', NULL, 3, NULL, b'0', b'0'),
-('QST00000009', 'CHU00000001', 'FRM00000002', NULL, 'Emergency Contact Phone', NULL, 'textField', 'Enter phone', 4, NULL, b'0', b'1'),
+('QST00000006', 'CHU00000001', 'FRM00000002', NULL, 'Child''s Full Name', NULL, 'Textbox', 'Enter child name', 1, NULL, b'0', b'1'),
+('QST00000007', 'CHU00000001', 'FRM00000002', NULL, 'Child''s Age', NULL, 'Textbox', 'Enter age', 2, NULL, b'0', b'1'),
+('QST00000008', 'CHU00000001', 'FRM00000002', NULL, 'Allergies or Special Needs', 'Please list any allergies or special needs we should know about.', 'Text Area', NULL, 3, NULL, b'0', b'0'),
+('QST00000009', 'CHU00000001', 'FRM00000002', NULL, 'Emergency Contact Phone', NULL, 'Textbox', 'Enter phone', 4, NULL, b'0', b'1'),
 -- Small Group Interest Survey
-('QST00000010', 'CHU00000001', 'FRM00000003', NULL, 'What day of the week works best?', NULL, 'dropdown', NULL, 1, 'Monday,Tuesday,Wednesday,Thursday,Friday,Saturday', b'0', b'1'),
-('QST00000011', 'CHU00000001', 'FRM00000003', NULL, 'What topics interest you most?', 'Select all that apply.', 'checkboxes', NULL, 2, 'Bible Study,Prayer,Fellowship,Community Service,Parenting,Marriage', b'0', b'0'),
-('QST00000012', 'CHU00000001', 'FRM00000003', NULL, 'Any additional comments?', NULL, 'textArea', 'Share your thoughts...', 3, NULL, b'0', b'0');
+('QST00000010', 'CHU00000001', 'FRM00000003', NULL, 'What day of the week works best?', NULL, 'Multiple Choice', NULL, 1, '[{"value":"Monday","text":"Monday"},{"value":"Tuesday","text":"Tuesday"},{"value":"Wednesday","text":"Wednesday"},{"value":"Thursday","text":"Thursday"},{"value":"Friday","text":"Friday"},{"value":"Saturday","text":"Saturday"}]', b'0', b'1'),
+('QST00000011', 'CHU00000001', 'FRM00000003', NULL, 'What topics interest you most?', 'Select all that apply.', 'Checkbox', NULL, 2, '[{"value":"Bible Study","text":"Bible Study"},{"value":"Prayer","text":"Prayer"},{"value":"Fellowship","text":"Fellowship"},{"value":"Community Service","text":"Community Service"},{"value":"Parenting","text":"Parenting"},{"value":"Marriage","text":"Marriage"}]', b'0', b'0'),
+('QST00000012', 'CHU00000001', 'FRM00000003', NULL, 'Any additional comments?', NULL, 'Text Area', 'Share your thoughts...', 3, NULL, b'0', b'0');
 
 -- ========================================
 -- Form Submissions
@@ -648,6 +676,10 @@ INSERT INTO rolePermissions (id, churchId, roleId, apiName, contentType, action)
 
 INSERT INTO roleMembers (id, churchId, roleId, userId, dateAdded) VALUES
 ('RME00000099', 'CHU00000099', 'ROL00000099', 'USR00000002', '2024-01-01 00:00:00');
+
+-- Single-site demo church: assign every person and group to the Main Campus.
+UPDATE people SET campusId = 'CAM00000001' WHERE churchId = 'CHU00000001';
+UPDATE `groups` SET campusId = 'CAM00000001' WHERE churchId = 'CHU00000001';
 
 END $$
 DELIMITER ;

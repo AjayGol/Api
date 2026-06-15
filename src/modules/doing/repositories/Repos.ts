@@ -1,7 +1,6 @@
 import {
-  ActionRepo,
   AssignmentRepo,
-  AutomationRepo,
+  AutomationExecutionRepo,
   BlockoutDateRepo,
   ConditionRepo,
   ConjunctionRepo,
@@ -11,15 +10,20 @@ import {
   PlanItemTimeRepo,
   PlanTypeRepo,
   PositionRepo,
+  SchedulingPreferenceRepo,
   TaskRepo,
   TimeRepo,
-  MembershipRepo
+  WorkflowRepo,
+  WorkflowStepRepo,
+  WorkflowStepActionRepo,
+  WorkflowStepRouteRepo,
+  WorkflowCategoryRepo,
+  WorkflowTriggerRepo
 } from "./index.js";
 
 export class Repos {
-  public action: ActionRepo;
   public assignment: AssignmentRepo;
-  public automation: AutomationRepo;
+  public automationExecution: AutomationExecutionRepo;
   public blockoutDate: BlockoutDateRepo;
   public condition: ConditionRepo;
   public conjunction: ConjunctionRepo;
@@ -29,9 +33,15 @@ export class Repos {
   public planItemTime: PlanItemTimeRepo;
   public planType: PlanTypeRepo;
   public position: PositionRepo;
+  public schedulingPreference: SchedulingPreferenceRepo;
   public task: TaskRepo;
   public time: TimeRepo;
-  public membership: MembershipRepo;
+  public workflow: WorkflowRepo;
+  public workflowStep: WorkflowStepRepo;
+  public workflowStepAction: WorkflowStepActionRepo;
+  public workflowStepRoute: WorkflowStepRouteRepo;
+  public workflowCategory: WorkflowCategoryRepo;
+  public workflowTrigger: WorkflowTriggerRepo;
 
   private static _current: Repos = null;
   public static getCurrent = () => {
@@ -40,9 +50,8 @@ export class Repos {
   };
 
   constructor() {
-    this.action = new ActionRepo();
     this.assignment = new AssignmentRepo();
-    this.automation = new AutomationRepo();
+    this.automationExecution = new AutomationExecutionRepo();
     this.blockoutDate = new BlockoutDateRepo();
     this.condition = new ConditionRepo();
     this.conjunction = new ConjunctionRepo();
@@ -52,8 +61,14 @@ export class Repos {
     this.planItemTime = new PlanItemTimeRepo();
     this.planType = new PlanTypeRepo();
     this.position = new PositionRepo();
+    this.schedulingPreference = new SchedulingPreferenceRepo();
     this.task = new TaskRepo();
     this.time = new TimeRepo();
-    this.membership = new MembershipRepo();
+    this.workflow = new WorkflowRepo();
+    this.workflowStep = new WorkflowStepRepo();
+    this.workflowStepAction = new WorkflowStepActionRepo();
+    this.workflowStepRoute = new WorkflowStepRouteRepo();
+    this.workflowCategory = new WorkflowCategoryRepo();
+    this.workflowTrigger = new WorkflowTriggerRepo();
   }
 }

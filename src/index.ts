@@ -25,6 +25,24 @@ const startServer = async () => {
       startRailwayCron();
     }
 
+    if (Environment.currentEnvironment === "dev") {
+      const runDevCron = async () => {
+        try {
+          const { NotificationHelper } = await import("./modules/messaging/helpers/NotificationHelper.js");
+          const { RepoManager } = await import("./shared/infrastructure/RepoManager.js");
+          const repos = await RepoManager.getRepos<any>("messaging");
+          NotificationHelper.init(repos);
+          await NotificationHelper.processScheduledNotifications();
+        } catch (err) {
+          console.error("[dev-cron] Failed to process scheduled notifications:", err);
+        }
+      };
+      // Run once shortly after startup
+      setTimeout(() => { void runDevCron(); }, 5000);
+      // Then run every 30 seconds
+      setInterval(() => { void runDevCron(); }, 30000);
+    }
+
     // Graceful shutdown — single handler for all cleanup
     let shuttingDown = false;
     const gracefulShutdown = async (signal: string) => {

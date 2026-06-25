@@ -35,6 +35,17 @@ export class NotificationController extends MessagingBaseController {
     }) as any;
   }
 
+  @httpGet("/group/:groupId")
+  public async loadForGroup(@requestParam("groupId") groupId: string, req: express.Request, res: express.Response): Promise<unknown> {
+    return this.actionWrapper(req, res, async (au) => {
+      if (!(await this.canSendGroupPush(au))) return this.json({ error: "Unauthorized" }, 401);
+
+      const contentId = groupId.substring(0, 11);
+      const notifications = await this.repos.notification.loadForGroup(au.churchId, contentId, 10);
+      return notifications;
+    }) as any;
+  }
+
   @httpGet("/:churchId/person/:personId")
   public async loadByPerson(
     @requestParam("churchId") _churchId: string,
@@ -119,13 +130,25 @@ export class NotificationController extends MessagingBaseController {
       const message = (req.body?.message || "").trim();
       const link = (req.body?.link || "").trim();
       const imageUrl = (req.body?.imageUrl || "").trim();
+      const timeToSendStr = req.body?.timeToSend;
+      let timeToSend: Date | undefined = undefined;
+
+      if (timeToSendStr) {
+        timeToSend = new Date(timeToSendStr);
+        if (isNaN(timeToSend.getTime())) {
+          return this.json({ error: "Invalid schedule time format" }, 400);
+        }
+        if (timeToSend <= new Date()) {
+          return this.json({ error: "Scheduled time must be in the future" }, 400);
+        }
+      }
 
       if (!groupId || !title || !message) return this.json({ error: "groupId, title, and message are required" }, 400);
 
       const preview = await this.getGroupPushPreview(au.churchId, groupId, au.personId);
       if (preview.eligiblePersonIds.length === 0) return this.json({ error: "No group members have PWA push enabled on this device set." }, 400);
 
-      const contentId = `${groupId}:${Date.now()}`;
+      const contentId = groupId.substring(0, 11);
       const defaultLink = `/mobile/groups/${groupId}`;
       const notificationLink = link || defaultLink;
       const notifications = await NotificationHelper.createNotifications(
@@ -139,6 +162,7 @@ export class NotificationController extends MessagingBaseController {
         {
           deliveryStartLevel: 1,
           deliveryTitle: title,
+          timeToSend,
           navData: {
             innerType: "group",
             innerId: groupId,
@@ -147,6 +171,19 @@ export class NotificationController extends MessagingBaseController {
           }
         }
       );
+
+      const isScheduled = !!timeToSend;
+      if (isScheduled) {
+        const { eligiblePersonIds: _eligiblePersonIds, ...result } = preview;
+        return {
+          ...result,
+          recipientCount: preview.eligiblePersonIds.length,
+          successCount: 0,
+          skippedCount: 0,
+          scheduled: true,
+          timeToSend: timeToSend.toISOString()
+        };
+      }
 
       const pushCount = notifications.filter((n) => n.deliveryMethod === "push").length;
       const { eligiblePersonIds: _eligiblePersonIds, ...result } = preview;

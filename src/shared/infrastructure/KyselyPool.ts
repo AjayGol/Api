@@ -41,6 +41,7 @@ export class KyselyPool {
             enableKeepAlive: true,
             keepAliveInitialDelay: 0,
             charset: "utf8mb4",
+            timezone: "Z",
             typeCast: function castField(field: any, useDefaultTypeCasting: () => unknown) {
               if (field.type === "BIT" && field.length === 1) {
                 try {

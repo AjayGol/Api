@@ -40,6 +40,7 @@ export function createKysely(moduleName: string): Kysely<any> {
       password: config.password,
       connectionLimit: 3,
       charset: "utf8mb4",
+      timezone: "Z",
       typeCast(field: any, next: () => unknown) {
         if (field.type === "BIT" && field.length === 1) {
           const bytes = field.buffer();

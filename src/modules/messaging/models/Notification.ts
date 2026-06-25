@@ -10,4 +10,7 @@ export class Notification {
   public link?: string;
   public deliveryMethod?: string;
   public triggeredByPersonId?: string;
+  public timeToSend?: Date;
+  public status?: "scheduled" | "processing" | "sent" | "failed" | "cancelled";
+  public title?: string;
 }

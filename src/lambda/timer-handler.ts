@@ -119,7 +119,12 @@ export const handleWebhookTimer = async (_event: ScheduledEvent, _context: Conte
     const { WebhookDeliveryWorker } = await import("../shared/webhooks/index.js");
     const repos = await RepoManager.getRepos<any>("membership");
     const result = await WebhookDeliveryWorker.process(repos);
-    console.log("[handleWebhookTimer] result:", JSON.stringify(result));
+    console.log("[handleWebhookTimer] webhook result:", JSON.stringify(result));
+
+    console.log("[handleWebhookTimer] Processing scheduled notifications...");
+    const messagingRepos = await RepoManager.getRepos<any>("messaging");
+    NotificationHelper.init(messagingRepos);
+    await NotificationHelper.processScheduledNotifications();
   } catch (error) {
     console.error("Error in webhook timer:", error);
     throw error;

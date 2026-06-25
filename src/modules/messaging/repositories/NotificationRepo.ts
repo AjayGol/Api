@@ -22,8 +22,11 @@ export class NotificationRepo {
       link: model.link,
       deliveryMethod: model.deliveryMethod,
       triggeredByPersonId: model.triggeredByPersonId,
-      timeSent: sql`NOW()`,
-      isNew: true as any
+      timeSent: model.timeSent || (model.timeToSend ? null : sql`NOW()`),
+      isNew: model.isNew !== undefined ? (model.isNew as any) : (model.timeToSend ? false : true as any),
+      timeToSend: model.timeToSend || null,
+      status: model.status || (model.timeToSend ? "scheduled" : "sent"),
+      title: model.title || null
     }).execute();
     return model;
   }
@@ -36,7 +39,11 @@ export class NotificationRepo {
       message: model.message,
       link: model.link,
       deliveryMethod: model.deliveryMethod,
-      triggeredByPersonId: model.triggeredByPersonId
+      triggeredByPersonId: model.triggeredByPersonId,
+      timeSent: model.timeSent,
+      status: model.status,
+      timeToSend: model.timeToSend,
+      title: model.title || null
     }).where("id", "=", model.id).where("churchId", "=", model.churchId).execute();
     return model;
   }
@@ -50,6 +57,8 @@ export class NotificationRepo {
     return getDb().selectFrom("notifications").selectAll()
       .where("churchId", "=", churchId)
       .where("personId", "=", personId)
+      .where("status", "=", "sent")
+      .where("timeSent", "is not", null)
       .orderBy("timeSent", "desc")
       .execute();
   }
@@ -109,6 +118,8 @@ export class NotificationRepo {
     return getDb().selectFrom("notifications").selectAll()
       .where("churchId", "=", churchId)
       .where("personId", "=", personId)
+      .where("status", "=", "sent")
+      .where("timeSent", "is not", null)
       .orderBy("timeSent", "desc")
       .execute();
   }
@@ -120,6 +131,8 @@ export class NotificationRepo {
         .where("churchId", "=", churchId)
         .where("personId", "=", personId)
         .where("isNew", "=", true as any)
+        .where("status", "=", "sent")
+        .where("timeSent", "is not", null)
         .as("notificationCount"),
       eb.selectFrom("privateMessages")
         .select(sql<number>`COUNT(*)`.as("pmCount"))
@@ -133,6 +146,7 @@ export class NotificationRepo {
   public async loadUndelivered() {
     return getDb().selectFrom("notifications").selectAll()
       .where("isNew", "=", true as any)
+      .where("status", "=", "sent")
       .where((eb) =>
         eb.or([
           eb("deliveryMethod", "is", null),
@@ -156,8 +170,64 @@ export class NotificationRepo {
   public async loadPendingEscalation() {
     return getDb().selectFrom("notifications").selectAll()
       .where("isNew", "=", true as any)
+      .where("status", "=", "sent")
       .where("deliveryMethod", "in", ["socket", "push"])
       .execute();
+  }
+
+  public async loadDueScheduled(limit: number) {
+    return getDb().selectFrom("notifications").selectAll()
+      .where("status", "=", "scheduled")
+      .where("timeToSend", "<=", new Date())
+      .orderBy("timeToSend", "asc")
+      .limit(limit)
+      .execute();
+  }
+
+  public async loadForGroup(churchId: string, contentId: string, limit: number) {
+    return getDb().selectFrom("notifications")
+      .select([
+        "title",
+        "message",
+        "timeToSend",
+        "timeSent",
+        "status",
+        "link",
+        "triggeredByPersonId",
+        sql<number>`count(distinct personId)`.as("recipientCount")
+      ])
+      .where("churchId", "=", churchId)
+      .where("contentType", "=", "groupPushNotification")
+      .where("contentId", "=", contentId)
+      .groupBy(["title", "message", "timeToSend", "timeSent", "status", "link", "triggeredByPersonId"])
+      .orderBy(sql`coalesce(timeToSend, timeSent)`, "desc")
+      .limit(limit)
+      .execute();
+  }
+
+  public async markProcessing(notificationIds: string[], lockId: string) {
+    if (notificationIds.length === 0) return;
+    await getDb().updateTable("notifications")
+      .set({ status: "processing", deliveryMethod: lockId, timeSent: sql`NOW()` as any })
+      .where("id", "in", notificationIds)
+      .where("status", "=", "scheduled")
+      .execute();
+  }
+
+  public async loadLockedForProcessing(lockId: string) {
+    return getDb().selectFrom("notifications").selectAll()
+      .where("status", "=", "processing")
+      .where("deliveryMethod", "=", lockId)
+      .execute();
+  }
+
+  public async recoverStuckProcessing() {
+    const result = await getDb().updateTable("notifications")
+      .set({ status: "scheduled", deliveryMethod: "scheduled", timeSent: null })
+      .where("status", "=", "processing")
+      .where("timeSent", "<=", sql`DATE_SUB(NOW(), INTERVAL 15 MINUTE)` as any)
+      .execute();
+    return Number(result[0]?.numUpdatedRows || 0n);
   }
 
   protected rowToModel(data: any): Notification {
@@ -172,7 +242,10 @@ export class NotificationRepo {
       message: data.message,
       link: data.link,
       deliveryMethod: data.deliveryMethod,
-      triggeredByPersonId: data.triggeredByPersonId
+      triggeredByPersonId: data.triggeredByPersonId,
+      timeToSend: data.timeToSend,
+      status: data.status,
+      title: data.title
     };
   }
 

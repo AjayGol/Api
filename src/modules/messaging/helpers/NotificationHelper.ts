@@ -21,6 +21,7 @@ export interface CreateNotificationOptions {
   deliveryStartLevel?: number;
   deliveryTitle?: string;
   navData?: Record<string, unknown>;
+  timeToSend?: Date;
 }
 
 export class NotificationHelper {
@@ -636,17 +637,21 @@ export class NotificationHelper {
   static createNotifications = async (peopleIds: string[], churchId: string, contentType: string, contentId: string, message: string, link?: string, triggeredByPersonId?: string, options?: CreateNotificationOptions) => {
     this.ensureInitialized();
     const notifications: Notification[] = [];
+    const isScheduled = options?.timeToSend && new Date(options.timeToSend).getTime() > Date.now();
     peopleIds.forEach((personId: string) => {
       const notification: Notification = {
         churchId,
         personId,
         contentType,
         contentId,
-        timeSent: new Date(),
-        isNew: true,
+        timeSent: isScheduled ? null : new Date(),
+        isNew: isScheduled ? false : true,
         message,
         link,
-        triggeredByPersonId
+        triggeredByPersonId,
+        timeToSend: options?.timeToSend || null,
+        status: isScheduled ? "scheduled" : "sent",
+        title: options?.deliveryTitle || null
       };
       notifications.push(notification);
     });
@@ -654,13 +659,18 @@ export class NotificationHelper {
     // Return early if no notifications to create
     if (notifications.length === 0) return [];
 
-    // don't notify people a second time about the same type of event.
-    const existing = (await NotificationHelper.repos.notification.loadExistingUnread(notifications[0].churchId, notifications[0].contentType, notifications[0].contentId)) as any[] || [];
+    // don't notify people a second time about the same type of event (except for group push notifications or scheduled notifications)
+    const shouldSkipSuppression = notifications[0].contentType === "groupPushNotification" || isScheduled;
+    const existing = shouldSkipSuppression
+      ? []
+      : (await NotificationHelper.repos.notification.loadExistingUnread(notifications[0].churchId, notifications[0].contentType, notifications[0].contentId)) as any[] || [];
     const suppressedPersonIds: string[] = [];
-    for (let i = notifications.length - 1; i >= 0; i--) {
-      if (existing.length > 0 && ArrayHelper.getAll(existing, "personId", notifications[i].personId).length > 0) {
-        suppressedPersonIds.push(notifications[i].personId);
-        notifications.splice(i, 1);
+    if (!shouldSkipSuppression) {
+      for (let i = notifications.length - 1; i >= 0; i--) {
+        if (existing.length > 0 && ArrayHelper.getAll(existing, "personId", notifications[i].personId).length > 0) {
+          suppressedPersonIds.push(notifications[i].personId);
+          notifications.splice(i, 1);
+        }
       }
     }
     if (suppressedPersonIds.length > 0) {
@@ -675,6 +685,10 @@ export class NotificationHelper {
       const promises: Promise<Notification>[] = [];
       notifications.forEach((n) => {
         const promise = NotificationHelper.repos.notification.save(n).then(async (notification) => {
+          if (isScheduled) {
+            return notification;
+          }
+
           // Use escalation logic - start at level 0 (socket)
           let title = "New Notification";
           if (n.message.includes("Volunteer Requests:")) {
@@ -709,6 +723,128 @@ export class NotificationHelper {
       const result = await Promise.all(promises);
       return result;
     } else return [];
+  };
+
+  static processScheduledNotifications = async () => {
+    this.ensureInitialized();
+    const startTime = Date.now();
+    const runLockId = Math.random().toString(36).substring(2, 8); // 6-character random run ID
+
+    console.log(`[Scheduled Pushes] [Run: ${runLockId}] Checking for due scheduled notifications...`);
+
+    // 1. Recover stuck processing records (due >15 minutes ago)
+    try {
+      const recoveredCount = await NotificationHelper.repos.notification.recoverStuckProcessing();
+      if (recoveredCount > 0) {
+        console.log(`[Scheduled Pushes] [Run: ${runLockId}] Recovered ${recoveredCount} stuck notifications back to scheduled state.`);
+      }
+    } catch (err) {
+      console.error(`[Scheduled Pushes] [Run: ${runLockId}] Error running stuck notifications recovery sweep:`, err);
+    }
+
+    const envBatchSize = process.env.SCHEDULED_NOTIFICATIONS_BATCH_SIZE ? parseInt(process.env.SCHEDULED_NOTIFICATIONS_BATCH_SIZE, 10) : 50;
+    const BATCH_SIZE = isNaN(envBatchSize) ? 50 : envBatchSize;
+    const MAX_RUN_TIME = 40000; // 40 seconds execution safety limit
+    const processedIdsInRun = new Set<string>();
+    let totalProcessed = 0;
+
+    while (Date.now() - startTime < MAX_RUN_TIME) {
+      // 2. Load due notifications
+      const dueNotifications: Notification[] = (await NotificationHelper.repos.notification.loadDueScheduled(BATCH_SIZE)) as any[];
+      
+      // Filter out any we've already processed in this run
+      const freshDue = dueNotifications.filter(n => n.id && !processedIdsInRun.has(n.id));
+      if (freshDue.length === 0) {
+        break;
+      }
+
+      const ids = freshDue.map(n => n.id).filter(Boolean) as string[];
+      if (ids.length === 0) break;
+
+      const lockId = Math.random().toString(36).substring(2, 8); // Unique lock ID per batch
+      console.log(`[Scheduled Pushes] [Run: ${runLockId}] [Lock: ${lockId}] Attempting to lock ${ids.length} notifications...`);
+      
+      // 3. Lock notifications using the atomic status & deliveryMethod update
+      await NotificationHelper.repos.notification.markProcessing(ids, lockId);
+      
+      // 4. Fetch the successfully locked rows
+      const lockedNotifications: Notification[] = (await NotificationHelper.repos.notification.loadLockedForProcessing(lockId)) as any[];
+      if (lockedNotifications.length === 0) {
+        // If we couldn't lock any notifications in this batch (already claimed by another process),
+        // mark the attempted IDs as processed to avoid spinning on them.
+        ids.forEach(id => processedIdsInRun.add(id));
+        console.log(`[Scheduled Pushes] [Run: ${runLockId}] [Lock: ${lockId}] Lock check: no rows acquired (already claimed by another process).`);
+        break;
+      }
+
+      // Add to processed IDs
+      lockedNotifications.forEach(n => {
+        if (n.id) processedIdsInRun.add(n.id);
+      });
+
+      console.log(`[Scheduled Pushes] [Run: ${runLockId}] [Lock: ${lockId}] Lock acquired successfully for ${lockedNotifications.length} notifications. Starting concurrent delivery.`);
+
+      // 5. Process deliveries in parallel
+      const promises = lockedNotifications.map(async (notification) => {
+        const itemStartTime = Date.now();
+        console.log(`[Scheduled Pushes] [Run: ${runLockId}] [Lock: ${lockId}] [Notification: ${notification.id}] Picked up for delivery. Recipient: ${notification.personId}`);
+        try {
+          let title = "New Notification";
+          if (notification.title) {
+            title = notification.title;
+          } else if (notification.message.includes("Volunteer Requests:")) {
+            title = "New Plan Assignment";
+          } else if (notification.message.startsWith("New message:")) {
+            title = notification.message;
+          } else {
+            title = notification.message;
+          }
+
+          const deliveryMethod = await NotificationHelper.attemptDeliveryWithEscalation(
+            notification.churchId,
+            notification.personId,
+            0, // Start level 0 (socket)
+            title,
+            notification.message,
+            "notification",
+            notification.id,
+            { innerType: notification.contentType, innerId: notification.contentId, ...(notification.link ? { link: notification.link } : {}) }
+          );
+
+          notification.deliveryMethod = deliveryMethod;
+          notification.timeSent = new Date();
+          notification.isNew = true;
+          notification.status = "sent";
+          await NotificationHelper.repos.notification.save(notification);
+
+          console.log(`[Scheduled Pushes] [Run: ${runLockId}] [Lock: ${lockId}] [Notification: ${notification.id}] Delivered successfully. Recipient: ${notification.personId}, Method: ${deliveryMethod}, Duration: ${Date.now() - itemStartTime}ms`);
+        } catch (error: any) {
+          const ageMs = notification.timeToSend ? (Date.now() - new Date(notification.timeToSend).getTime()) : 0;
+          const maxRetryAgeMs = 4 * 60 * 60 * 1000; // 4 hours retry window
+          
+          if (ageMs > maxRetryAgeMs) {
+            console.error(`[Scheduled Pushes] [Run: ${runLockId}] [Lock: ${lockId}] [Notification: ${notification.id}] Permanent failure (exceeded retry window of 4 hours). Setting status to failed. Recipient: ${notification.personId}, Duration: ${Date.now() - itemStartTime}ms, Error: ${error?.message || error}`);
+            notification.status = "failed";
+            notification.timeSent = null;
+          } else {
+            console.warn(`[Scheduled Pushes] [Run: ${runLockId}] [Lock: ${lockId}] [Notification: ${notification.id}] Transient failure. Resetting to scheduled for retry. Recipient: ${notification.personId}, Duration: ${Date.now() - itemStartTime}ms, Error: ${error?.message || error}`);
+            notification.status = "scheduled";
+            notification.timeSent = null;
+          }
+          await NotificationHelper.repos.notification.save(notification);
+        }
+      });
+
+      await Promise.all(promises);
+      totalProcessed += lockedNotifications.length;
+
+      // Break if we got fewer notifications than BATCH_SIZE (no more due notifications left)
+      if (dueNotifications.length < BATCH_SIZE) {
+        break;
+      }
+    }
+
+    console.log(`[Scheduled Pushes] [Run: ${runLockId}] Batch completed. Processed ${totalProcessed} total notifications in ${Date.now() - startTime}ms.`);
   };
 
   static notifyUser = async (churchId: string, personId: string, title: string = "New Notification") => {

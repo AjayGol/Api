@@ -78,6 +78,23 @@ export class GroupMemberRepo {
       .execute();
   }
 
+  // Privacy-safe: explicit opt-in (publicRoster=1) + visible group; selects only display name/photo/leader, never contact/demographic.
+  public async loadPublicForGroup(churchId: string, groupId: string) {
+    return getDb().selectFrom("groupMembers as gm")
+      .innerJoin("people as p", (join) => join.onRef("p.id", "=", "gm.personId").on((eb) => eb.or([eb("p.removed", "=", 0 as any), eb("p.removed", "is", null)])))
+      .innerJoin("groups as g", "g.id", "gm.groupId")
+      .select(["gm.id", "gm.personId", "gm.leader", "p.displayName", "p.photoUpdated"])
+      .where("gm.churchId", "=", churchId)
+      .where("gm.groupId", "=", groupId)
+      .where("g.removed", "=", false as any)
+      .where("g.publicRoster", "=", true as any)
+      .where((eb) => eb.or([eb("g.archived", "is", null), eb("g.archived", "=", false as any)]))
+      .orderBy("gm.leader", "desc")
+      .orderBy("p.lastName")
+      .orderBy("p.firstName")
+      .execute();
+  }
+
   public async loadForGroups(churchId: string, groupIds: string[]) {
     if (!groupIds.length) return [];
     return getDb().selectFrom("groupMembers as gm")
@@ -114,7 +131,6 @@ export class GroupMemberRepo {
       .execute();
   }
 
-  // Per-group member aggregates for the health comparison view.
   public async loadHealthSummary(churchId: string) {
     const rows = await sql<any>`SELECT gm.groupId,
         COUNT(*) AS memberCount,
@@ -129,7 +145,6 @@ export class GroupMemberRepo {
     return rows.rows;
   }
 
-  // Same buckets as PersonRepo.loadDemographics, scoped to one group's members.
   public async loadDemographicsForGroup(churchId: string, groupId: string) {
     const db = getDb();
     const genderRows = await sql<any>`SELECT COALESCE(NULLIF(TRIM(p.gender), ''), 'Unassigned') AS name, COUNT(*) AS count
@@ -232,6 +247,19 @@ export class GroupMemberRepo {
   public convertAllToModel(_churchId: string, data: any[]) {
     if (!Array.isArray(data)) return [];
     return data.map((d) => this.rowToModel(d));
+  }
+
+  public convertAllToPublicModel(churchId: string, data: any[]) {
+    if (!Array.isArray(data)) return [];
+    return data.map((d) => {
+      const result: any = {
+        id: d.personId,
+        name: { display: d.displayName },
+        photo: PersonHelper.getPhotoPath(churchId, { id: d.personId, photoUpdated: d.photoUpdated })
+      };
+      if (d.leader) result.role = "Leader";
+      return result;
+    });
   }
 
   public convertAllToBasicModel(churchId: string, data: any[]) {

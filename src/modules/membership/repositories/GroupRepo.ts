@@ -31,6 +31,19 @@ export class GroupRepo {
       slug: group.slug,
       campusId: group.campusId,
       joinPolicy: group.joinPolicy ?? "open",
+      archived: group.archived ?? false,
+      publicRoster: group.publicRoster ?? false,
+      confidential: group.confidential ?? false,
+      minAgeMonths: group.minAgeMonths,
+      maxAgeMonths: group.maxAgeMonths,
+      minGrade: group.minGrade,
+      maxGrade: group.maxGrade,
+      capacity: group.capacity,
+      guestCapacity: group.guestCapacity,
+      checkinClosed: (group.checkinClosed ?? false) as any,
+      volunteerRatio: group.volunteerRatio,
+      minVolunteers: group.minVolunteers,
+      importKey: group.importKey,
       removed: false as any
     }).execute();
     return group;
@@ -53,7 +66,22 @@ export class GroupRepo {
       labels: group.labels as any,
       slug: group.slug,
       campusId: group.campusId,
-      joinPolicy: group.joinPolicy ?? "open"
+      joinPolicy: group.joinPolicy ?? "open",
+      archived: group.archived ?? false,
+      publicRoster: group.publicRoster ?? false,
+      // Explicit false so un-setting confidential persists (Kysely drops undefined).
+      confidential: group.confidential ?? false,
+      minAgeMonths: group.minAgeMonths,
+      maxAgeMonths: group.maxAgeMonths,
+      minGrade: group.minGrade,
+      maxGrade: group.maxGrade,
+      // Explicit null so clearing a capacity/ratio persists (undefined is dropped from the UPDATE).
+      capacity: group.capacity ?? null,
+      guestCapacity: group.guestCapacity ?? null,
+      checkinClosed: (group.checkinClosed ?? false) as any,
+      volunteerRatio: group.volunteerRatio ?? null,
+      minVolunteers: group.minVolunteers ?? null,
+      importKey: group.importKey
     }).where("id", "=", group.id).where("churchId", "=", group.churchId).execute();
     return group;
   }
@@ -68,11 +96,16 @@ export class GroupRepo {
   }
 
   public async load(churchId: string, id: string) {
-    return (await getDb().selectFrom("groups").selectAll().where("id", "=", id).where("churchId", "=", churchId).where("removed", "=", false as any).executeTakeFirst()) ?? null;
+    // by-id loads must still return archived groups (admin detail page, delete, restore)
+    return (await getDb().selectFrom("groups").selectAll().where("id", "=", id).where("churchId", "=", churchId).where("removed", "=", false as any)
+      .executeTakeFirst()) ?? null;
   }
 
   public async loadPublicSlug(churchId: string, slug: string) {
-    return (await getDb().selectFrom("groups").selectAll().where("churchId", "=", churchId).where("slug", "=", slug).where("removed", "=", false as any).executeTakeFirst()) ?? null;
+    return (await getDb().selectFrom("groups").selectAll().where("churchId", "=", churchId).where("slug", "=", slug).where("removed", "=", false as any)
+      .where((eb) => eb.or([eb("archived", "is", null), eb("archived", "=", false as any)]))
+      .where((eb) => eb.or([eb("confidential", "is", null), eb("confidential", "=", false as any)]))
+      .executeTakeFirst()) ?? null;
   }
 
   public async loadByTag(churchId: string, tag: string) {
@@ -80,7 +113,8 @@ export class GroupRepo {
       .selectAll("g")
       .select((eb) => eb.selectFrom("groupMembers as gm").whereRef("gm.groupId", "=", "g.id").select(eb.fn.countAll().as("count")).as("memberCount"))
       .where("g.churchId", "=", churchId)
-      .where("g.removed", "=", 0 as any)
+      .where("g.removed", "=", false as any)
+      .where((eb) => eb.or([eb("g.archived", "is", null), eb("g.archived", "=", false as any)]))
       .where("g.tags", "like", "%" + tag + "%")
       .orderBy("g.categoryName")
       .orderBy("g.name")
@@ -92,7 +126,20 @@ export class GroupRepo {
       .selectAll("g")
       .select((eb) => eb.selectFrom("groupMembers as gm").whereRef("gm.groupId", "=", "g.id").select(eb.fn.countAll().as("count")).as("memberCount"))
       .where("g.churchId", "=", churchId)
-      .where("g.removed", "=", 0 as any)
+      .where("g.removed", "=", false as any)
+      .where((eb) => eb.or([eb("g.archived", "is", null), eb("g.archived", "=", false as any)]))
+      .orderBy("g.categoryName")
+      .orderBy("g.name")
+      .execute();
+  }
+
+  public async loadArchived(churchId: string) {
+    return getDb().selectFrom("groups as g")
+      .selectAll("g")
+      .select((eb) => eb.selectFrom("groupMembers as gm").whereRef("gm.groupId", "=", "g.id").select(eb.fn.countAll().as("count")).as("memberCount"))
+      .where("g.churchId", "=", churchId)
+      .where("g.removed", "=", false as any)
+      .where("g.archived", "=", true as any)
       .orderBy("g.categoryName")
       .orderBy("g.name")
       .execute();
@@ -104,7 +151,8 @@ export class GroupRepo {
       .selectAll("g")
       .distinct()
       .where("gm.personId", "=", personId)
-      .where("g.removed", "=", 0 as any)
+      .where("g.removed", "=", false as any)
+      .where((eb) => eb.or([eb("g.archived", "is", null), eb("g.archived", "=", false as any)]))
       .orderBy("g.name")
       .execute();
   }
@@ -115,7 +163,8 @@ export class GroupRepo {
       .selectAll("g")
       .distinct()
       .where("gm.personId", "=", personId)
-      .where("g.removed", "=", 0 as any)
+      .where("g.removed", "=", false as any)
+      .where((eb) => eb.or([eb("g.archived", "is", null), eb("g.archived", "=", false as any)]))
       .where("g.tags", "like", "%standard%")
       .orderBy("g.name")
       .execute();
@@ -126,12 +175,14 @@ export class GroupRepo {
     return getDb().selectFrom("groups").selectAll()
       .where("attendanceReminders", "=", 1 as any)
       .where("removed", "=", false as any)
+      .where((eb) => eb.or([eb("archived", "is", null), eb("archived", "=", false as any)]))
       .execute();
   }
 
   public async loadByIds(churchId: string, ids: string[]) {
     if (!ids.length) return [];
-    return getDb().selectFrom("groups").selectAll().where("churchId", "=", churchId).where("id", "in", ids).orderBy("name").execute();
+    return getDb().selectFrom("groups").selectAll().where("churchId", "=", churchId).where("id", "in", ids)
+      .orderBy("name").execute();
   }
 
   public async publicLabel(churchId: string, label: string) {
@@ -139,6 +190,8 @@ export class GroupRepo {
       .where("churchId", "=", churchId)
       .where("labels", "like", "%" + label + "%")
       .where("removed", "=", false as any)
+      .where((eb) => eb.or([eb("archived", "is", null), eb("archived", "=", false as any)]))
+      .where((eb) => eb.or([eb("confidential", "is", null), eb("confidential", "=", false as any)]))
       .orderBy("name")
       .execute();
   }
@@ -150,7 +203,8 @@ export class GroupRepo {
       .leftJoin("services as s", "s.id", "st.serviceId")
       .select(["g.id", "g.categoryName", "g.name"])
       .where("g.churchId", "=", churchId)
-      .where("g.removed", "=", 0 as any);
+      .where("g.removed", "=", false as any)
+      .where((eb: any) => eb.or([eb("g.archived", "is", null), eb("g.archived", "=", false as any)]));
     if (serviceTimeId !== "0") query = query.where("gst.serviceTimeId", "=", serviceTimeId);
     if (serviceId !== "0") query = query.where("st.serviceId", "=", serviceId);
     if (campusId !== "0") query = query.where("s.campusId", "=", campusId);
@@ -191,7 +245,19 @@ export class GroupRepo {
       labelArray: [],
       slug: row.slug,
       campusId: row.campusId,
-      joinPolicy: (row.joinPolicy as Group["joinPolicy"]) ?? "open"
+      joinPolicy: (row.joinPolicy as Group["joinPolicy"]) ?? "open",
+      archived: row.archived,
+      publicRoster: row.publicRoster,
+      confidential: row.confidential,
+      minAgeMonths: row.minAgeMonths,
+      maxAgeMonths: row.maxAgeMonths,
+      minGrade: row.minGrade,
+      maxGrade: row.maxGrade,
+      capacity: row.capacity,
+      guestCapacity: row.guestCapacity,
+      checkinClosed: row.checkinClosed === 1 || row.checkinClosed === true,
+      volunteerRatio: row.volunteerRatio,
+      minVolunteers: row.minVolunteers
     };
     row.labels?.split(",").forEach((label: string) => result.labelArray.push(label.trim()));
     return result;

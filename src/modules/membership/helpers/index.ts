@@ -10,6 +10,7 @@ export type IPermission = { contentType: string; action: string };
 // Module-specific helpers
 export { CaddyHelper } from "./CaddyHelper.js";
 export { ChurchHelper } from "./ChurchHelper.js";
+export { ConversationalFormHelper, type FormContact } from "./ConversationalFormHelper.js";
 export { GeoHelper } from "./GeoHelper.js";
 export { HubspotHelper } from "./HubspotHelper.js";
 export { MauticHelper } from "./MauticHelper.js";
@@ -18,6 +19,7 @@ export { PersonConditionHelper } from "./PersonConditionHelper.js";
 export { PersonHelper } from "./PersonHelper.js";
 export { ListRuleHelper } from "./ListRuleHelper.js";
 export { ListRefreshHelper } from "./ListRefreshHelper.js";
+export { GradePromotionHelper, GRADES, nextGrade } from "./GradePromotionHelper.js";
 export { RoleHelper } from "./RoleHelper.js";
 export { UserHelper } from "./UserHelper.js";
 export { UserChurchHelper } from "./UserChurchHelper.js";

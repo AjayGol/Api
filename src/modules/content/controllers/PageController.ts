@@ -1,6 +1,6 @@
 import express from "express";
 import { controller, httpDelete, httpGet, httpPost, requestParam } from "inversify-express-utils";
-import { Permissions } from "../helpers/index.js";
+import { Permissions, canViewPage, PUBLIC_VISIBILITY } from "../helpers/index.js";
 import { TreeHelper } from "../helpers/TreeHelper.js";
 import { Element, Page, Section } from "../models/index.js";
 import { ContentBaseController } from "./ContentBaseController.js";
@@ -15,10 +15,17 @@ export class PageController2 extends ContentBaseController {
         url = "/" + url;
       }
       const id = req.query.id as string;
-      const page = id ? await this.repos.page.load(churchId, id) : await this.repos.page.loadByUrl(churchId, url);
+      const siteId = (typeof req.query.siteId === "string" ? req.query.siteId : "");
+      const page = id ? await this.repos.page.load(churchId, id) : await this.repos.page.loadByUrl(churchId, url, siteId);
+      // Id-based (editor) loads carry no ?siteId — the page row itself knows its site (footer selection).
+      const effectiveSiteId = (page as any)?.siteId ?? siteId;
 
       let result: Page = {};
       if (page?.id !== undefined) {
+        // Only url-based (public render) requests are gated; the editor's id-based requests are unchanged.
+        if (url && !canViewPage(page, this.authUser())) {
+          return { restricted: true, visibility: page.visibility || PUBLIC_VISIBILITY };
+        }
         result = page;
         // Public (url-based) requests serve the published snapshot when one exists; the
         // editor's id-based requests always see the working tree.
@@ -28,14 +35,14 @@ export class PageController2 extends ContentBaseController {
           const allElements = this.flattenTreeElements(result.sections);
           TreeHelper.populateAnswers(allElements);
           TreeHelper.populateAnswers(result.sections);
-          await TreeHelper.insertBlocks(result.sections, allElements, churchId);
+          await TreeHelper.insertBlocks(result.sections, allElements, churchId, effectiveSiteId);
         } else {
           const sections = await this.repos.section.loadForPage(churchId, page.id);
           const allElements: Element[] = await this.repos.element.loadForPage(churchId, page.id);
           TreeHelper.populateAnswers(allElements);
           TreeHelper.populateAnswers(sections);
           result.sections = TreeHelper.buildTree(sections, allElements);
-          await TreeHelper.insertBlocks(result.sections, allElements, churchId);
+          await TreeHelper.insertBlocks(result.sections, allElements, churchId, effectiveSiteId);
         }
         if (url) this.removeTreeFields(result);
       }
@@ -102,8 +109,11 @@ export class PageController2 extends ContentBaseController {
   @httpGet("/public/:churchId")
   public async loadPublic(@requestParam("churchId") churchId: string, req: express.Request<{}, {}, null>, res: express.Response): Promise<any> {
     return this.actionWrapperAnon(req, res, async () => {
-      const pages: Page[] = await this.repos.page.loadAll(churchId);
-      return pages.map((p) => ({ url: p.url, title: p.title }));
+      const siteId = (typeof req.query.siteId === "string" ? req.query.siteId : "");
+      const pages: Page[] = await this.repos.page.loadAll(churchId, siteId);
+      return pages
+        .filter((p) => (p.visibility || PUBLIC_VISIBILITY) === PUBLIC_VISIBILITY)
+        .map((p) => ({ url: p.url, title: p.title, metaDescription: p.metaDescription }));
     });
   }
 
@@ -117,7 +127,8 @@ export class PageController2 extends ContentBaseController {
   @httpGet("/")
   public async loadAll(req: express.Request, res: express.Response): Promise<any> {
     return this.actionWrapper(req, res, async (au) => {
-      return await this.repos.page.loadAll(au.churchId);
+      const siteId = (typeof req.query.siteId === "string" ? req.query.siteId : "");
+      return await this.repos.page.loadAll(au.churchId, siteId);
     });
   }
 
@@ -160,6 +171,7 @@ export class PageController2 extends ContentBaseController {
       if (!au.checkAccess(Permissions.content.edit)) return this.json({}, 401);
       else {
         const promises: Promise<Page>[] = [];
+        req.body.page.siteId = req.body.page.siteId || "";
         promises.push(this.repos.page.save(req.body.page));
         req.body.sections.forEach((section) => {
           promises.push(this.repos.section.save(section));
@@ -181,6 +193,7 @@ export class PageController2 extends ContentBaseController {
         const promises: Promise<Page>[] = [];
         req.body.forEach((page) => {
           page.churchId = au.churchId;
+          page.siteId = page.siteId || "";
           promises.push(this.repos.page.save(page));
         });
         const result = await Promise.all(promises);
@@ -203,6 +216,7 @@ export class PageController2 extends ContentBaseController {
   private removeTreeFields(page: Page) {
     delete page.id;
     delete page.churchId;
+    delete page.groupIds;
     page.sections.forEach((s) => {
       delete s.id;
       delete s.churchId;

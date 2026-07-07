@@ -10,9 +10,6 @@ interface EvalContext {
   visitedListIds: Set<string>;
 }
 
-// Evaluates a list's rules tree to person ids. Each condition is answered by its
-// owning module (provider) so cross-product rules stay live; groups combine child
-// results with all/any/none set logic.
 export class ListRuleHelper {
   public static async getPeopleIds(churchId: string, list: List, repos: Repos): Promise<string[]> {
     if (!list.rules) return [];
@@ -50,6 +47,7 @@ export class ListRuleHelper {
       case "person": return this.evalPerson(c, ctx);
       case "group": return this.evalGroup(c, ctx);
       case "form": return this.evalForm(c, ctx);
+      case "field": return this.evalField(c, ctx);
       case "giving": {
         const { start, end } = this.getWindow(c);
         return new Set(await getGivingModuleGateway().loadDonorPersonIds(ctx.churchId, c.entityId || null, start, end));
@@ -100,6 +98,35 @@ export class ListRuleHelper {
     return ids;
   }
 
+  private static async evalField(c: ListRuleCondition, ctx: EvalContext): Promise<Set<string>> {
+    if (!c.entityId) return new Set();
+    const field: any = await ctx.repos.personField.load(ctx.churchId, c.entityId);
+    if (!field) return new Set();
+    const values = (await ctx.repos.personFieldValue.loadForField(ctx.churchId, c.entityId)) as any[];
+    const ids = new Set<string>();
+    values.forEach((v) => {
+      if (v.personId && this.matchAnswer(field.fieldType, v.value, c.operator ?? "contains", c.value ?? "")) ids.add(v.personId);
+    });
+    return ids;
+  }
+
+  // Filters people rows by custom-field conditions (field = "personField_<fieldId>"), ANDed together.
+  public static async filterByFieldConditions(churchId: string, data: any[], conditions: SearchCondition[], repos: Repos): Promise<any[]> {
+    let result = data;
+    for (const c of conditions) {
+      const fieldId = c.field.substring("personField_".length);
+      const field: any = await repos.personField.load(churchId, fieldId);
+      if (!field) return [];
+      const values = (await repos.personFieldValue.loadForField(churchId, fieldId)) as any[];
+      const matchedIds = new Set<string>();
+      values.forEach((v) => {
+        if (v.personId && this.matchAnswer(field.fieldType, v.value, c.operator ?? "contains", c.value ?? "")) matchedIds.add(v.personId);
+      });
+      result = result.filter((p) => matchedIds.has(p.id));
+    }
+    return result;
+  }
+
   private static async evalList(c: ListRuleCondition, ctx: EvalContext): Promise<Set<string>> {
     if (!c.entityId || ctx.visitedListIds.has(c.entityId)) return new Set();
     ctx.visitedListIds.add(c.entityId);
@@ -110,14 +137,13 @@ export class ListRuleHelper {
       ids = await this.evaluateGroup(list.rules, ctx);
       ids = await this.expandHousehold(ids, list.householdInclusion, ctx);
     } else {
-      // Legacy list without rules: fall back to the cached refresh membership.
       ids = new Set(await ctx.repos.listMember.loadPersonIds(ctx.churchId, c.entityId));
     }
     if (c.operator === "notIn") return this.complement(ids, ctx);
     return ids;
   }
 
-  private static matchAnswer(fieldType: string, answerValue: string, operator: string, searchValue: string): boolean {
+  public static matchAnswer(fieldType: string, answerValue: string, operator: string, searchValue: string): boolean {
     if (answerValue === null || answerValue === undefined) return false;
     if (fieldType === "Whole Number" || fieldType === "Decimal") {
       const a = parseFloat(answerValue);

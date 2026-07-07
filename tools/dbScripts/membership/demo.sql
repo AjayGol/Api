@@ -24,6 +24,7 @@ BEGIN
     TRUNCATE TABLE associatedGroups;
     TRUNCATE TABLE notes;
     TRUNCATE TABLE `groups`;
+    TRUNCATE TABLE householdPickupPeople;
     TRUNCATE TABLE people;
     TRUNCATE TABLE households;
     TRUNCATE TABLE churches;
@@ -296,6 +297,19 @@ INSERT INTO `groups` (id, churchId, categoryName, name, trackAttendance, parentP
 
 -- Special Events
 ('GRP00000030', 'CHU00000001', 'Events', 'Vacation Bible School', 1, 1, 1, 'Annual summer program for children.', 'Summer', 'Various', 'standard', 'events', 'vacation-bible-school', 0);
+
+-- Confidential group (care/recovery): hidden from public finders + roster gated.
+-- demo@b1.church (PER00000082) IS a member (member-visibility test); tester@b1.church (PER00000083) is NOT (exclusion test).
+INSERT INTO `groups` (id, churchId, categoryName, name, trackAttendance, parentPickup, printNametag, about, meetingTime, meetingLocation, tags, labels, slug, confidential, removed) VALUES
+('GRP00000031', 'CHU00000001', 'Support', 'Care & Recovery', 0, 0, 0, 'Confidential care and recovery group.', 'Wednesday 7:00 PM', 'Room 105', 'standard', 'support', 'care-recovery', 1, 0);
+
+INSERT INTO groupMembers (id, churchId, groupId, personId, joinDate, leader) VALUES
+('GME00000200', 'CHU00000001', 'GRP00000031', 'PER00000001', '2024-01-01', 1), -- John Smith (leader)
+('GME00000201', 'CHU00000001', 'GRP00000031', 'PER00000082', '2024-01-01', 0), -- Demo User (member)
+('GME00000202', 'CHU00000001', 'GRP00000031', 'PER00000025', '2024-01-01', 0); -- Richard Miller
+
+-- Opt one team group into public roster exposure (staff/team grid demo data)
+UPDATE `groups` SET publicRoster = b'1' WHERE id = 'GRP0000000b' AND churchId = 'CHU00000001';
 
 -- Group Memberships
 INSERT INTO groupMembers (id, churchId, groupId, personId, joinDate, leader) VALUES
@@ -599,6 +613,26 @@ INSERT INTO questions (id, churchId, formId, parentId, title, description, field
 ('QST00000012', 'CHU00000001', 'FRM00000003', NULL, 'Any additional comments?', NULL, 'Text Area', 'Share your thoughts...', 3, NULL, b'0', b'0');
 
 -- ========================================
+-- Standalone public forms (contentType='form')
+-- Exercises the anonymous flow: GET /forms/standalone + GET /questions/unrestricted + POST /formsubmissions.
+-- FRM00000004 is public (restricted=0); FRM00000005 is members-only (restricted=1).
+-- ========================================
+INSERT INTO forms (id, churchId, name, contentType, createdTime, modifiedTime, restricted, archived, removed, thankYouMessage) VALUES
+('FRM00000004', 'CHU00000001', 'VBS Registration (Public)', 'form', '2025-07-01 10:00:00', '2025-07-01 10:00:00', b'0', b'0', b'0', 'Your child is registered for Vacation Bible School! See you there.'),
+('FRM00000005', 'CHU00000001', 'Members Only Survey', 'form', '2025-07-01 10:00:00', '2025-07-01 10:00:00', b'1', b'0', b'0', 'Thank you for your feedback!');
+
+INSERT INTO questions (id, churchId, formId, parentId, title, description, fieldType, placeholder, sort, choices, removed, required) VALUES
+('QST00000013', 'CHU00000001', 'FRM00000004', NULL, 'Child Full Name', NULL, 'Textbox', 'Enter child name', 1, NULL, b'0', b'1'),
+('QST00000014', 'CHU00000001', 'FRM00000004', NULL, 'Emergency Contact Phone', NULL, 'Textbox', 'Enter phone', 2, NULL, b'0', b'1'),
+('QST00000015', 'CHU00000001', 'FRM00000005', NULL, 'Feedback', NULL, 'Text Area', NULL, 1, NULL, b'0', b'0');
+
+-- A leader subscribed to email/push notifications for FRM00000004 submissions.
+-- This makes an anonymous submit fire the notification path (emails + the
+-- /notifications/ping push) — the path that regressed and 401'd the submit.
+INSERT INTO memberPermissions (id, churchId, memberId, contentType, contentId, action, emailNotification) VALUES
+('MPR00000001', 'CHU00000001', 'PER00000001', 'form', 'FRM00000004', 'admin', b'1');
+
+-- ========================================
 -- Form Submissions
 -- ========================================
 INSERT INTO formSubmissions (id, churchId, formId, contentType, contentId, submissionDate, submittedBy) VALUES
@@ -680,6 +714,17 @@ INSERT INTO roleMembers (id, churchId, roleId, userId, dateAdded) VALUES
 -- Single-site demo church: assign every person and group to the Main Campus.
 UPDATE people SET campusId = 'CAM00000001' WHERE churchId = 'CHU00000001';
 UPDATE `groups` SET campusId = 'CAM00000001' WHERE churchId = 'CHU00000001';
+
+-- Check-in child-safety demo config (Phase 3):
+-- Nursery is an age-ranged child room (0-24 months).
+UPDATE `groups` SET minAgeMonths = 0, maxAgeMonths = 24 WHERE id = 'GRP00000007';
+-- Elementary (K-2) has a hard capacity of 2, one guest slot, and a 1:5 ratio (min 1 volunteer).
+UPDATE `groups` SET capacity = 2, guestCapacity = 1, volunteerRatio = 5, minVolunteers = 1 WHERE id = 'GRP00000009';
+
+-- Trusted / not-authorized pickup people for the Smith household (HOU00000001).
+INSERT INTO householdPickupPeople (id, churchId, householdId, personId, name, relationship, status, notes, createdDate) VALUES
+('HPP00000001', 'CHU00000001', 'HOU00000001', NULL, 'Grandma Edna', 'Grandmother', 'trusted', 'Approved to pick up all Smith children.', '2024-01-01 00:00:00'),
+('HPP00000002', 'CHU00000001', 'HOU00000001', NULL, 'Rick Sanders', NULL, 'notAuthorized', 'Do not release children to this person.', '2024-01-01 00:00:00');
 
 END $$
 DELIMITER ;

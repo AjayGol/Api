@@ -24,43 +24,53 @@ const initEnv = async () => {
   console.log("[initEnv] Environment initialization complete");
 };
 
-export const handle15MinTimer = async (_event: ScheduledEvent, _context: Context): Promise<void> => {
+export const handle30MinTimer = async (_event: ScheduledEvent, _context: Context): Promise<void> => {
   const startTime = Date.now();
-  console.log("[handle15MinTimer] ========== TIMER START ==========");
-  console.log("[handle15MinTimer] Timestamp:", new Date().toISOString());
+  console.log("[handle30MinTimer] ========== TIMER START ==========");
+  console.log("[handle30MinTimer] Timestamp:", new Date().toISOString());
   try {
-    console.log("[handle15MinTimer] Calling initEnv...");
+    console.log("[handle30MinTimer] Calling initEnv...");
     await initEnv();
-    console.log("[handle15MinTimer] initEnv completed in", Date.now() - startTime, "ms");
+    console.log("[handle30MinTimer] initEnv completed in", Date.now() - startTime, "ms");
 
     // Step 1: Escalate notifications that haven't been read
-    console.log("[handle15MinTimer] Escalating unread notifications...");
+    console.log("[handle30MinTimer] Escalating unread notifications...");
     const escalationResult = await NotificationHelper.escalateDelivery();
-    console.log("[handle15MinTimer] escalateDelivery result:", JSON.stringify(escalationResult));
+    console.log("[handle30MinTimer] escalateDelivery result:", JSON.stringify(escalationResult));
 
     // Step 2: Process individual email notifications (for users with "individual" email frequency)
-    console.log("[handle15MinTimer] Processing individual email notifications...");
+    console.log("[handle30MinTimer] Processing individual email notifications...");
     const emailResult = await NotificationHelper.sendEmailNotifications("individual");
-    console.log("[handle15MinTimer] sendEmailNotifications result:", JSON.stringify(emailResult));
+    console.log("[handle30MinTimer] sendEmailNotifications result:", JSON.stringify(emailResult));
 
-    console.log("[handle15MinTimer] Sending approval digest emails...");
+    console.log("[handle30MinTimer] Sending approval digest emails...");
     const { ApprovalHelper } = await import("../modules/content/helpers/ApprovalHelper.js");
     const digestResult = await ApprovalHelper.sendApprovalDigests();
-    console.log("[handle15MinTimer] sendApprovalDigests result:", JSON.stringify(digestResult));
+    console.log("[handle30MinTimer] sendApprovalDigests result:", JSON.stringify(digestResult));
 
-    console.log("[handle15MinTimer] Processing due automation executions...");
+    console.log("[handle30MinTimer] Processing due automation executions...");
     const { ExecutionHelper } = await import("../modules/doing/helpers/ExecutionHelper.js");
     const doingRepos = await RepoManager.getRepos<any>("doing");
     const retried = await ExecutionHelper.processDue(doingRepos);
-    console.log(`[handle15MinTimer] executionRetries=${retried}`);
+    console.log(`[handle30MinTimer] executionRetries=${retried}`);
 
-    console.log("[handle15MinTimer] ========== TIMER COMPLETE ==========");
-    console.log("[handle15MinTimer] Total execution time:", Date.now() - startTime, "ms");
+    console.log("[handle30MinTimer] Dispatching due reminders...");
+    const { scanReminders } = await import("../modules/messaging/helpers/ReminderBootstrap.js");
+    const messagingRepos = await RepoManager.getRepos<any>("messaging");
+    const reminderResult = await scanReminders(messagingRepos);
+    console.log("[handle30MinTimer] scanReminders result:", JSON.stringify(reminderResult));
+
+    console.log("[handle30MinTimer] Reaping stale connection rows...");
+    const { SocketHelper } = await import("../modules/messaging/helpers/SocketHelper.js");
+    await SocketHelper.reapStaleConnections(messagingRepos);
+
+    console.log("[handle30MinTimer] ========== TIMER COMPLETE ==========");
+    console.log("[handle30MinTimer] Total execution time:", Date.now() - startTime, "ms");
   } catch (error) {
-    console.error("[handle15MinTimer] ========== TIMER ERROR ==========");
-    console.error("[handle15MinTimer] Error after", Date.now() - startTime, "ms");
-    console.error("[handle15MinTimer] Error:", error);
-    console.error("[handle15MinTimer] Stack:", (error as Error).stack);
+    console.error("[handle30MinTimer] ========== TIMER ERROR ==========");
+    console.error("[handle30MinTimer] Error after", Date.now() - startTime, "ms");
+    console.error("[handle30MinTimer] Error:", error);
+    console.error("[handle30MinTimer] Stack:", (error as Error).stack);
     throw error;
   }
 };
@@ -73,10 +83,6 @@ export const handleMidnightTimer = async (_event: ScheduledEvent, _context: Cont
     console.log("[handleMidnightTimer] Calling initEnv...");
     await initEnv();
     console.log("[handleMidnightTimer] initEnv completed in", Date.now() - startTime, "ms");
-
-    console.log("[handleMidnightTimer] Calling AutomationHelper.remindServiceRequests...");
-    await AutomationHelper.remindServiceRequests();
-    console.log("[handleMidnightTimer] remindServiceRequests completed in", Date.now() - startTime, "ms");
 
     console.log("[handleMidnightTimer] Calling AutomationHelper.remindGroupAttendance...");
     await AutomationHelper.remindGroupAttendance();
@@ -94,10 +100,27 @@ export const handleMidnightTimer = async (_event: ScheduledEvent, _context: Cont
     const listResult = await ListRefreshHelper.refreshAutoLists();
     console.log("[handleMidnightTimer] refreshAutoLists result:", JSON.stringify(listResult));
 
+    // Annual grade promotion for churches that opted in via the gradePromotionDate setting.
+    console.log("[handleMidnightTimer] Checking grade promotions...");
+    const { GradePromotionHelper } = await import("../modules/membership/helpers/GradePromotionHelper.js");
+    const gradeResult = await GradePromotionHelper.checkPromotions();
+    console.log("[handleMidnightTimer] checkPromotions result:", JSON.stringify(gradeResult));
+
     // Automation execution history retention (>= 32 days required; we keep 90).
     console.log("[handleMidnightTimer] Purging old automation executions...");
     const doingRepos = await RepoManager.getRepos<any>("doing");
     await doingRepos.automationExecution.purgeOld();
+
+    console.log("[handleMidnightTimer] Expanding reminder occurrences...");
+    const { expandReminders } = await import("../modules/messaging/helpers/ReminderBootstrap.js");
+    const messagingRepos = await RepoManager.getRepos<any>("messaging");
+    const expandResult = await expandReminders(messagingRepos);
+    console.log("[handleMidnightTimer] expandReminders count:", expandResult);
+
+    // Audit log retention (365 days) — must stay above any future undo window.
+    console.log("[handleMidnightTimer] Purging old audit logs...");
+    const membershipRepos = await RepoManager.getRepos<any>("membership");
+    await membershipRepos.auditLog.deleteOld(365);
 
     console.log("[handleMidnightTimer] Processing daily email notifications...");
     const result = await NotificationHelper.sendEmailNotifications("daily");

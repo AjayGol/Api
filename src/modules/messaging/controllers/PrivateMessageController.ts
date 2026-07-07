@@ -13,15 +13,11 @@ export class PrivateMessageController extends MessagingBaseController {
       const promises: Promise<PrivateMessage>[] = [];
       req.body.forEach((conv) => {
         conv.churchId = au.churchId;
+        conv.fromPersonId = au.personId;
         const promise = this.repos.privateMessage.save(conv).then((c) => {
           // For direct private message API, use generic notification since we don't have message content
           // Private messages through conversations use the typed notification in checkShouldNotify
-          NotificationHelper.notifyUser(au.churchId, c.toPersonId, "New Private Message").then((method) => {
-            if (method) {
-              c.deliveryMethod = method;
-              this.repos.privateMessage.save(c);
-            }
-          });
+          NotificationHelper.notifyUser(au.churchId, c.toPersonId, "New Private Message");
           return c;
         });
         promises.push(promise);
@@ -58,6 +54,8 @@ export class PrivateMessageController extends MessagingBaseController {
       }
 
       await this.repos.privateMessage.markAllRead(au.churchId, au.personId);
+      // Retire the escalator's DM shadow rows now that the inbox has been read.
+      await this.repos.notification.markPrivateMessagesRead(au.churchId, au.personId);
 
       return privateMessages;
     });
@@ -77,9 +75,12 @@ export class PrivateMessageController extends MessagingBaseController {
   public async get(@requestParam("id") id: string, req: express.Request<{}, {}, null>, res: express.Response): Promise<unknown> {
     return this.actionWrapper(req, res, async (au) => {
       const result = (await this.repos.privateMessage.loadById(au.churchId, id)) as any;
+      if (result?.fromPersonId !== au.personId && result?.toPersonId !== au.personId) return this.json({}, 401);
       if (result.notifyPersonId === au.personId) {
         result.notifyPersonId = null;
         await this.repos.privateMessage.save(result);
+        // The shadow row's contentId is the privateMessage id; retire it too.
+        await this.repos.notification.markPrivateMessageRead(au.churchId, au.personId, result.id);
       }
       return result;
     });

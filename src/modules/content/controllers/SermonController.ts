@@ -157,9 +157,9 @@ export class SermonController extends ContentBaseController {
 
   @httpGet("/timeline")
   public async getPosts(req: express.Request<{}, {}, null>, res: express.Response): Promise<any> {
-    return this.actionWrapper(req, res, async () => {
+    return this.actionWrapper(req, res, async (au) => {
       const sermonIds = req.query.sermonIds ? req.query.sermonIds.toString().split(",") : [];
-      return await this.repos.sermon.loadTimeline(sermonIds);
+      return await this.repos.sermon.loadTimeline(au.churchId, sermonIds);
     });
   }
 
@@ -310,5 +310,3 @@ export class SermonController extends ContentBaseController {
     });
   }
 }
-
-// when fetching for subtitles, if I get an error send that error. but sometimes even if the subtitles are there it sends an empty array. So what I want is, if it sends an empty array, I want to call for subtitles again. I want to do that 5 times. Even after that, the subtitles is still an empty array, send an error saying, could not load the subtitles for 5 rounds or something.

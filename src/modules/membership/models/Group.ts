@@ -5,7 +5,7 @@ export class Group {
   public name?: string;
   public trackAttendance?: boolean;
   public attendanceReminders?: boolean;
-  public parentPickup?: false;
+  public parentPickup?: boolean;
   public printNametag?: boolean;
   public about?: string;
   public photoUrl?: string;
@@ -16,6 +16,18 @@ export class Group {
   public labelArray?: string[];
   public slug?: string;
   public campusId?: string;
+  public archived?: boolean;
+  public publicRoster?: boolean;
+  public confidential?: boolean;
+  public minAgeMonths?: number;
+  public maxAgeMonths?: number;
+  public minGrade?: string;
+  public maxGrade?: string;
+  public capacity?: number;
+  public guestCapacity?: number;
+  public checkinClosed?: boolean;
+  public volunteerRatio?: number;
+  public minVolunteers?: number;
 
   public joinPolicy?: "open" | "request" | "closed";
 

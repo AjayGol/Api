@@ -4,6 +4,7 @@ import { MessagingBaseController } from "./MessagingBaseController.js";
 import { Conversation, Message } from "../models/index.js";
 import { ArrayHelper, EncryptionHelper } from "@churchapps/apihelper";
 import { DeliveryHelper } from "../helpers/DeliveryHelper.js";
+import { Permissions } from "../../../shared/helpers/Permissions.js";
 
 const contentRoom = (contentType?: string, contentId?: string) =>
   contentType && contentId ? `content-${contentType}-${contentId}` : null;
@@ -88,8 +89,30 @@ export class ConversationController extends MessagingBaseController {
         }
       }
 
+      await this.appendReactions(conversations, churchId, au.personId);
+
       return conversations;
     }) as any;
+  }
+
+  private async appendReactions(conversations: Conversation[], churchId: string, personId: string) {
+    const messageIds: string[] = [];
+    conversations.forEach((c) => (c.messages || []).forEach((m: any) => { if (m?.id) messageIds.push(m.id); }));
+    if (messageIds.length === 0) return;
+    const rows = await this.repos.messageReaction.loadForMessages(churchId, messageIds);
+    const byMessage = new Map<string, Map<string, { emoji: string; count: number; mine: boolean }>>();
+    for (const r of rows as any[]) {
+      let emojiMap = byMessage.get(r.messageId);
+      if (!emojiMap) { emojiMap = new Map(); byMessage.set(r.messageId, emojiMap); }
+      let entry = emojiMap.get(r.emoji);
+      if (!entry) { entry = { emoji: r.emoji, count: 0, mine: false }; emojiMap.set(r.emoji, entry); }
+      entry.count++;
+      if (r.personId === personId) entry.mine = true;
+    }
+    conversations.forEach((c) => (c.messages || []).forEach((m: any) => {
+      const emojiMap = byMessage.get(m.id);
+      m.reactions = emojiMap ? Array.from(emojiMap.values()) : [];
+    }));
   }
 
   @httpGet("/:churchId/:contentType/:contentId")
@@ -114,6 +137,7 @@ export class ConversationController extends MessagingBaseController {
     }) as any;
   }
 
+  // authz-exempt: self-service — every conversation's churchId is forced to au.churchId from the JWT before save
   @httpPost("/")
   public async save(req: express.Request<{}, {}, Conversation[]>, res: express.Response): Promise<Conversation[]> {
     return this.actionWrapper(req, res, async (au) => {
@@ -123,9 +147,7 @@ export class ConversationController extends MessagingBaseController {
         promises.push(this.repos.conversation.save(conversation));
       }) as any;
       const result = await Promise.all(promises);
-      // Notify any client subscribed to this content's room (e.g. a second tab on the
-      // same person profile) that a conversation now exists for it. Without this, the
-      // second tab would still show conversationId=null until a manual reload.
+      // Notify subscribed clients so other tabs see the new conversation.
       const activityPromises: Promise<unknown>[] = [];
       result.forEach((c) => {
         const room = contentRoom(c.contentType, c.contentId);
@@ -213,6 +235,7 @@ export class ConversationController extends MessagingBaseController {
   @httpDelete("/:churchId/:id")
   public async delete(@requestParam("churchId") _churchId: string, @requestParam("id") id: string, req: express.Request<{}, {}, null>, res: express.Response): Promise<void> {
     return this.actionWrapper(req, res, async (au) => {
+      if (!au.checkAccess(Permissions.content.edit)) return this.json({}, 401);
       await this.repos.conversation.delete(au.churchId, id);
     }) as any;
   }

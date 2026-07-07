@@ -27,7 +27,7 @@ export class NotificationController extends MessagingBaseController {
   @httpGet("/groupPreview/:groupId")
   public async previewGroupPush(@requestParam("groupId") groupId: string, req: express.Request, res: express.Response): Promise<unknown> {
     return this.actionWrapper(req, res, async (au) => {
-      if (!(await this.canSendGroupPush(au))) return this.json({ error: "Unauthorized" }, 401);
+      if (!au.checkAccess(Permissions.groupMembers.edit)) return this.json({ error: "Unauthorized" }, 401);
 
       const preview = await this.getGroupPushPreview(au.churchId, groupId, au.personId);
       const { eligiblePersonIds: _eligiblePersonIds, ...result } = preview;
@@ -43,6 +43,7 @@ export class NotificationController extends MessagingBaseController {
       res: express.Response
   ): Promise<Notification[]> {
     return this.actionWrapper(req, res, async (au) => {
+      if (personId !== au.personId && !au.checkAccess(Permissions.messaging.admin)) return this.json({}, 401);
       const data = await this.repos.notification.loadByPersonId(au.churchId, personId);
       return this.repos.notification.convertAllToModel(data as any[]);
     }) as any;
@@ -59,6 +60,7 @@ export class NotificationController extends MessagingBaseController {
   @httpPost("/")
   public async save(req: express.Request<{}, {}, Notification[]>, res: express.Response): Promise<Notification[]> {
     return this.actionWrapper(req, res, async (au) => {
+      if (!au.checkAccess(Permissions.messaging.admin)) return this.json({}, 401);
       const promises: Promise<Notification>[] = [];
       req.body.forEach((notification) => {
         notification.churchId = au.churchId;
@@ -72,6 +74,7 @@ export class NotificationController extends MessagingBaseController {
   @httpPost("/markRead/:churchId/:personId")
   public async markRead(@requestParam("churchId") _churchId: string, @requestParam("personId") personId: string, req: express.Request<{}, {}, null>, res: express.Response): Promise<void> {
     return this.actionWrapper(req, res, async (au) => {
+      if (personId !== au.personId && !au.checkAccess(Permissions.messaging.admin)) return this.json({}, 401);
       await this.repos.notification.markRead(au.churchId, personId);
     }) as any;
   }
@@ -79,6 +82,7 @@ export class NotificationController extends MessagingBaseController {
   @httpPost("/sendTest")
   public async sendTestNotification(req: express.Request<{}, {}, any>, res: express.Response): Promise<any> {
     return this.actionWrapper(req, res, async (au) => {
+      if (!au.checkAccess(Permissions.messaging.admin)) return this.json({}, 401);
       const { personId, title } = req.body;
       const method = await NotificationHelper.notifyUser(au.churchId, personId, title || "Test Notification");
       return { method, success: true };
@@ -102,9 +106,12 @@ export class NotificationController extends MessagingBaseController {
     }) as any;
   }
 
+  // Called from other modules (e.g. Doing: task assignment, plan publish/notify) after the
+  // triggering action already passed its own permission check.
   @httpPost("/create")
   public async create(req: express.Request<{}, {}, any>, res: express.Response): Promise<unknown> {
     return this.actionWrapper(req, res, async (au) => {
+      if (!au.checkAccess(Permissions.messaging.admin)) return this.json({}, 401);
       return await NotificationHelper.createNotifications(req.body.peopleIds, au.churchId, req.body.contentType, req.body.contentId, req.body.message, req.body?.link, au.personId);
     }) as any;
   }
@@ -112,7 +119,7 @@ export class NotificationController extends MessagingBaseController {
   @httpPost("/group/send")
   public async sendGroupPush(req: express.Request<{}, {}, any>, res: express.Response): Promise<unknown> {
     return this.actionWrapper(req, res, async (au) => {
-      if (!(await this.canSendGroupPush(au))) return this.json({ error: "Unauthorized" }, 401);
+      if (!au.checkAccess(Permissions.groupMembers.edit)) return this.json({ error: "Unauthorized" }, 401);
 
       const groupId = (req.body?.groupId || "").trim();
       const title = (req.body?.title || "").trim();
@@ -161,42 +168,13 @@ export class NotificationController extends MessagingBaseController {
 
   @httpPost("/ping")
   public async ping(req: express.Request<{}, {}, any>, res: express.Response): Promise<unknown> {
-    return this.actionWrapperAnon(req, res, async () => {
-      return await NotificationHelper.createNotifications([req.body.personId], req.body.churchId, req.body.contentType, req.body.contentId, req.body.message, undefined, req.body.triggeredByPersonId);
+    return this.actionWrapper(req, res, async (au) => {
+      if (!au.checkAccess(Permissions.messaging.admin)) return this.json({}, 401);
+      return await NotificationHelper.createNotifications([req.body.personId], au.churchId, req.body.contentType, req.body.contentId, req.body.message, undefined, req.body.triggeredByPersonId);
     }) as any;
   }
 
-  @httpGet("/tmpEmail")
-  public async tmpEmail(req: express.Request<{}, {}, any>, res: express.Response): Promise<unknown> {
-    return this.actionWrapperAnon(req, res, async () => {
-      console.log("[tmpEmail] Endpoint called, initializing NotificationHelper...");
-      NotificationHelper.init(this.repos);
-      console.log("[tmpEmail] Calling sendEmailNotifications('daily')...");
-      const result = await NotificationHelper.sendEmailNotifications("daily");
-      console.log("[tmpEmail] Complete, result:", JSON.stringify(result));
-      return result;
-    }) as any;
-  }
-
-  /*
-  @httpGet("/tmp15Min")
-  public async tmp15Min(req: express.Request<{}, {}, any>, res: express.Response): Promise<unknown> {
-    return this.actionWrapperAnon(req, res, async () => {
-      console.log("[tmp15Min] Endpoint called, initializing NotificationHelper...");
-      NotificationHelper.init(this.repos);
-
-      console.log("[tmp15Min] Step 1: Escalating unread notifications...");
-      const escalationResult = await NotificationHelper.escalateDelivery();
-      console.log("[tmp15Min] escalateDelivery result:", JSON.stringify(escalationResult));
-
-      console.log("[tmp15Min] Step 2: Processing individual email notifications...");
-      const emailResult = await NotificationHelper.sendEmailNotifications("individual");
-      console.log("[tmp15Min] sendEmailNotifications result:", JSON.stringify(emailResult));
-
-      return { escalationResult, emailResult };
-    }) as any;
-  }*/
-
+  // authz-exempt: self-service — deletes only the caller's own notifications, scoped by au.churchId + au.personId from the JWT
   @httpDelete("/my")
   public async deleteMy(req: express.Request<{}, {}, null>, res: express.Response): Promise<void> {
     return this.actionWrapper(req, res, async (au) => {
@@ -207,6 +185,8 @@ export class NotificationController extends MessagingBaseController {
   @httpDelete("/:churchId/:id")
   public async delete(@requestParam("churchId") _churchId: string, @requestParam("id") id: string, req: express.Request<{}, {}, null>, res: express.Response): Promise<void> {
     return this.actionWrapper(req, res, async (au) => {
+      const existing = await this.repos.notification.loadById(au.churchId, id);
+      if (existing?.personId !== au.personId && !au.checkAccess(Permissions.messaging.admin)) return this.json({}, 401);
       await this.repos.notification.delete(au.churchId, id);
     }) as any;
   }
@@ -220,20 +200,6 @@ export class NotificationController extends MessagingBaseController {
         personId: m.personId,
         displayName: m.person?.name?.display || m.displayName || ""
       }));
-  }
-
-  private async canSendGroupPush(au: any): Promise<boolean> {
-    if (au.checkAccess(Permissions.groupMembers.edit)) return true;
-    if (!au.id || !au.churchId) return false;
-
-    const membershipRepos = await RepoManager.getRepos<any>("membership");
-    const userChurch = await membershipRepos.rolePermission.loadUserPermissionInChurch(au.id, au.churchId);
-    const membershipApi = userChurch?.apis?.find((api: any) => api.keyName === "MembershipApi");
-
-    return !!membershipApi?.permissions?.some((permission: any) => {
-      if (permission.contentType === "Domain" && permission.action === "Admin") return true;
-      return permission.contentType === Permissions.groupMembers.edit.contentType && permission.action === Permissions.groupMembers.edit.action;
-    });
   }
 
   private prefAllowsPush(pref: NotificationPreference | undefined): boolean {

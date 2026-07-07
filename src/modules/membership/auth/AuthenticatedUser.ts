@@ -9,7 +9,7 @@ import { filterPermissionsByScopes } from "../../../shared/auth/Scopes.js";
 export class AuthenticatedUser extends BaseAuthenticatedUser {
   public static async login(allUserChurches: LoginUserChurch[], user: User) {
     const userChurches = [...allUserChurches];
-    if (userChurches.length > 1 && userChurches[0].church.id === "") userChurches.splice(0, 1); // remove empty church with universal permissions if there are actual church records.
+    if (userChurches.length > 1 && userChurches[0].church.id === "") userChurches.splice(0, 1);
 
     // if (churches.length === 0) return null;
     // else {
@@ -29,7 +29,8 @@ export class AuthenticatedUser extends BaseAuthenticatedUser {
   }
 
   public static getApiJwt(api: Api, user: User, userChurch: LoginUserChurch) {
-    const permList = buildPermStrings([api]);
+    // Monolith: tokens carry full permissions so any module honors them without cross-API fallback.
+    const permList = buildPermStrings(userChurch.apis);
 
     const groupIds: string[] = [];
     userChurch.groups?.forEach((g) => groupIds.push(g.id));
@@ -115,17 +116,19 @@ export class AuthenticatedUser extends BaseAuthenticatedUser {
     );
   }
 
-  public static getUserJwt(user: User) {
-    return jwt.sign({ id: user.id, email: user.email, firstName: user.firstName, lastName: user.lastName }, Environment.jwtSecret, { expiresIn: "180 days" });
+  public static getUserJwt(user: User, expiresIn: string = "180 days") {
+    return jwt.sign({ id: user.id, email: user.email, firstName: user.firstName, lastName: user.lastName }, Environment.jwtSecret, { expiresIn: expiresIn as any });
   }
 
   public static setJwt(allUserChurches: LoginUserChurch[], user: User) {
     allUserChurches.forEach((uc) => {
       uc.apis?.forEach((api) => {
         api.jwt = AuthenticatedUser.getApiJwt(api, user, uc);
-        if (api.keyName === "ReportingApi") api.permissions = []; // We just need the jwt, not the list
       });
       uc.jwt = AuthenticatedUser.getChurchJwt(user, uc);
+      uc.apis?.forEach((api) => {
+        if (api.keyName === "ReportingApi") api.permissions = []; // We just need the jwt, not the list
+      });
     });
   }
 
@@ -140,7 +143,6 @@ export class AuthenticatedUser extends BaseAuthenticatedUser {
       const userId: string = principal.details.id;
       result = await repos.user.load(userId);
     } catch {
-      // JWT verification failed - user not found
     }
     return result;
   }

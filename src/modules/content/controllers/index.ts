@@ -10,6 +10,8 @@ export { LinkController } from "./LinkController.js";
 export { GlobalStyleController } from "./GlobalStyleController.js";
 export { FileController } from "./FileController.js";
 export { PageHistoryController } from "./PageHistoryController.js";
+export { PostController } from "./PostController.js";
+export { RedirectController } from "./RedirectController.js";
 
 // Media controllers
 export { SermonController } from "./SermonController.js";
@@ -18,6 +20,7 @@ export { StreamingServiceController } from "./StreamingServiceController.js";
 
 // Event controllers
 export { EventController } from "./EventController.js";
+export { EventRsvpController } from "./EventRsvpController.js";
 export { EventExceptionController } from "./EventExceptionController.js";
 export { CuratedCalendarController } from "./CuratedCalendarController.js";
 export { CuratedEventController } from "./CuratedEventController.js";

@@ -108,6 +108,42 @@ describe("GatewayService", () => {
     });
   });
 
+  describe("pauseSubscription / resumeSubscription", () => {
+    it("should call provider pauseSubscription with the resolved config and subscriptionId", async () => {
+      const mockProvider = { pauseSubscription: jest.fn().mockResolvedValue(undefined) };
+      (GatewayFactory.getProvider as jest.Mock).mockReturnValue(mockProvider);
+      const mockGateway = { provider: "stripe", publicKey: "public_key", privateKey: "encrypted_private_key", webhookKey: "encrypted_webhook_key", productId: "product_id" };
+
+      await GatewayService.pauseSubscription(mockGateway, "sub_123");
+
+      expect(mockProvider.pauseSubscription).toHaveBeenCalledWith(
+        expect.objectContaining({ publicKey: "public_key", privateKey: "decrypted_encrypted_private_key" }),
+        "sub_123"
+      );
+    });
+
+    it("should call provider resumeSubscription with the resolved config and subscriptionId", async () => {
+      const mockProvider = { resumeSubscription: jest.fn().mockResolvedValue(undefined) };
+      (GatewayFactory.getProvider as jest.Mock).mockReturnValue(mockProvider);
+      const mockGateway = { provider: "stripe", publicKey: "public_key", privateKey: "encrypted_private_key", webhookKey: "encrypted_webhook_key", productId: "product_id" };
+
+      await GatewayService.resumeSubscription(mockGateway, "sub_123");
+
+      expect(mockProvider.resumeSubscription).toHaveBeenCalledWith(
+        expect.objectContaining({ publicKey: "public_key", privateKey: "decrypted_encrypted_private_key" }),
+        "sub_123"
+      );
+    });
+
+    it("should propagate a provider's not-supported error", async () => {
+      const mockProvider = { pauseSubscription: jest.fn().mockRejectedValue(new Error("PayPal does not support subscription pausing")) };
+      (GatewayFactory.getProvider as jest.Mock).mockReturnValue(mockProvider);
+      const mockGateway = { provider: "paypal", publicKey: "public_key", privateKey: "encrypted_private_key" };
+
+      await expect(GatewayService.pauseSubscription(mockGateway, "sub_123")).rejects.toThrow("PayPal does not support subscription pausing");
+    });
+  });
+
   describe("getGatewayForChurch", () => {
     const createRepo = (gateways: any[]) => ({ loadAll: jest.fn().mockResolvedValue(gateways) });
 
@@ -215,138 +251,34 @@ describe("GatewayService", () => {
   });
 
   describe("getProviderCapabilities", () => {
-    it("should return correct capabilities for stripe", () => {
-      const result = GatewayService.getProviderCapabilities("stripe");
+    // Capability data lives on each provider class; this only verifies delegation.
+    it("returns the registered provider's capabilities", () => {
+      const capabilities = { supportsVault: true, supportsOrders: true };
+      (GatewayFactory.getProvider as jest.Mock).mockReturnValue({ capabilities });
 
-      expect(result).toEqual({
-        supportsOneTimePayments: true,
-        supportsSubscriptions: true,
-        supportsVault: true,
-        supportsACH: true,
-        supportsRefunds: true,
-        supportsPartialRefunds: true,
-        supportsWebhooks: true,
-        supportsOrders: false,
-        supportsInstantCapture: true,
-        supportsManualCapture: true,
-        supportsSCA: true,
-        requiresPlansForSubscriptions: false,
-        requiresCustomerForSubscription: true,
-        supportedPaymentMethods: ["card", "ach_debit", "link", "apple_pay", "google_pay"],
-        supportedCurrencies: [
-          "usd", "eur", "gbp", "cad", "aud", "jpy", "mxn", "nzd", "sgd", "inr"
-        ],
-        maxRefundWindow: 180,
-        minTransactionAmount: 50,
-        maxTransactionAmount: 99999999,
-        notes: ["Supports ACH via Plaid or micro-deposits", "Ideal for card + bank payments"]
-      });
+      expect(GatewayService.getProviderCapabilities("stripe")).toBe(capabilities);
+      expect(GatewayFactory.getProvider).toHaveBeenCalledWith("stripe");
     });
 
-    it("should return correct capabilities for paypal", () => {
-      const result = GatewayService.getProviderCapabilities("paypal");
+    it("accepts a gateway object and resolves by its provider name", () => {
+      const capabilities = { supportsOrders: true };
+      (GatewayFactory.getProvider as jest.Mock).mockReturnValue({ capabilities });
 
-      expect(result).toEqual({
-        supportsOneTimePayments: true,
-        supportsSubscriptions: true,
-        supportsVault: true,
-        supportsACH: false,
-        supportsRefunds: true,
-        supportsPartialRefunds: true,
-        supportsWebhooks: true,
-        supportsOrders: true,
-        supportsInstantCapture: true,
-        supportsManualCapture: true,
-        supportsSCA: true,
-        requiresPlansForSubscriptions: true,
-        requiresCustomerForSubscription: false,
-        supportedPaymentMethods: ["paypal", "card", "venmo", "pay_later"],
-        supportedCurrencies: [
-          "usd", "eur", "gbp", "cad", "aud", "jpy", "mxn", "nzd", "sgd"
-        ],
-        maxRefundWindow: 180,
-        minTransactionAmount: 100,
-        maxTransactionAmount: 1000000,
-        notes: ["Subscriptions require Billing Plans", "Order APIs power PayPal smart buttons"]
-      });
-    });
-
-    it("should return correct capabilities for square", () => {
-      const result = GatewayService.getProviderCapabilities("square");
-
-      expect(result).toEqual({
-        supportsOneTimePayments: true,
-        supportsSubscriptions: true,
-        supportsVault: true,
-        supportsACH: true,
-        supportsRefunds: true,
-        supportsPartialRefunds: true,
-        supportsWebhooks: true,
-        supportsOrders: false,
-        supportsInstantCapture: true,
-        supportsManualCapture: true,
-        supportsSCA: true,
-        requiresPlansForSubscriptions: false,
-        requiresCustomerForSubscription: true,
-        supportedPaymentMethods: ["card", "apple_pay", "google_pay", "ach_debit", "gift_card"],
-        supportedCurrencies: ["usd", "cad", "gbp", "aud", "jpy", "eur"],
-        maxRefundWindow: 120,
-        minTransactionAmount: 100,
-        maxTransactionAmount: 5000000,
-        notes: ["ACH support requires Square bank on file", "Subscriptions available with catalog plans"]
-      });
-    });
-
-    it("should return correct capabilities for epaymints", () => {
-      const result = GatewayService.getProviderCapabilities("epaymints");
-
-      expect(result).toEqual({
-        supportsOneTimePayments: true,
-        supportsSubscriptions: false,
-        supportsVault: false,
-        supportsACH: true,
-        supportsRefunds: true,
-        supportsPartialRefunds: false,
-        supportsWebhooks: false,
-        supportsOrders: false,
-        supportsInstantCapture: true,
-        supportsManualCapture: false,
-        supportsSCA: false,
-        requiresPlansForSubscriptions: false,
-        requiresCustomerForSubscription: false,
-        supportedPaymentMethods: ["card", "ach"],
-        supportedCurrencies: ["usd"],
-        maxRefundWindow: 90,
-        minTransactionAmount: 100,
-        maxTransactionAmount: 10000000,
-        notes: ["Webhooks limited; polling recommended", "ACH available via tokenised transactions"]
-      });
-    });
-
-    it("should handle provider names case insensitively", () => {
-      const stripeResult = GatewayService.getProviderCapabilities("STRIPE");
-      const paypalResult = GatewayService.getProviderCapabilities({ provider: "PayPal" });
-      const squareResult = GatewayService.getProviderCapabilities("Square");
-
-      expect(stripeResult).not.toBeNull();
-      expect(stripeResult?.supportedPaymentMethods).toContain("card");
-      expect(paypalResult).not.toBeNull();
-      expect(paypalResult?.supportsOrders).toBe(true);
-      expect(squareResult).not.toBeNull();
-      expect(squareResult?.supportedPaymentMethods).toContain("gift_card");
+      expect(GatewayService.getProviderCapabilities({ provider: "PayPal" })).toBe(capabilities);
+      expect(GatewayFactory.getProvider).toHaveBeenCalledWith("PayPal");
     });
 
     it("should return null for unknown provider", () => {
-      const result = GatewayService.getProviderCapabilities("unknown");
-      expect(result).toBeNull();
+      (GatewayFactory.getProvider as jest.Mock).mockImplementation(() => {
+        throw new Error("Unsupported payment gateway: unknown");
+      });
+      expect(GatewayService.getProviderCapabilities("unknown")).toBeNull();
     });
 
     it("should return null for empty provider", () => {
-      const result = GatewayService.getProviderCapabilities("");
-      expect(result).toBeNull();
+      expect(GatewayService.getProviderCapabilities("")).toBeNull();
     });
   });
-
   describe("validateSettings", () => {
     it("should return null when gateway has no settings", () => {
       const gateway = { provider: "stripe" };

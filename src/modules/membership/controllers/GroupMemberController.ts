@@ -18,14 +18,29 @@ export class GroupMemberController extends MembershipBaseController {
   @httpGet("/public/leaders/:churchId/:groupId")
   public async getPublicLeaders(@requestParam("churchId") churchId: string, @requestParam("groupId") groupId: string, req: express.Request<{}, {}, null>, res: express.Response): Promise<any> {
     return this.actionWrapperAnon(req, res, async () => {
+      const group: any = await this.repos.group.load(churchId, groupId);
+      if (group?.confidential) return [];
       const result = (await this.repos.groupMember.loadLeadersForGroup(churchId, groupId)) as any[];
       return this.repos.groupMember.convertAllToModel(churchId, result);
+    });
+  }
+
+  @httpGet("/public/:churchId/:groupId")
+  public async getPublicMembers(@requestParam("churchId") churchId: string, @requestParam("groupId") groupId: string, req: express.Request<{}, {}, null>, res: express.Response): Promise<any> {
+    return this.actionWrapperAnon(req, res, async () => {
+      const group: any = await this.repos.group.load(churchId, groupId);
+      if (group?.confidential) return [];
+      const rows = (await this.repos.groupMember.loadPublicForGroup(churchId, groupId)) as any[];
+      return this.repos.groupMember.convertAllToPublicModel(churchId, rows);
     });
   }
 
   @httpGet("/basic/:groupId")
   public async getbasic(@requestParam("groupId") groupId: string, req: express.Request<{}, {}, null>, res: express.Response): Promise<any> {
     return this.actionWrapper(req, res, async (au) => {
+      // Confidential-group rosters are members-or-staff only.
+      const group: any = await this.repos.group.load(au.churchId, groupId);
+      if (group?.confidential && !au.groupIds?.includes(groupId) && !au.checkAccess(Permissions.groupMembers.view)) return this.json({}, 401);
       const result = (await this.repos.groupMember.loadForGroup(au.churchId, groupId)) as any[];
       return this.repos.groupMember.convertAllToBasicModel(au.churchId, this.filterMinors(result, au, groupId));
     });
@@ -115,6 +130,8 @@ export class GroupMemberController extends MembershipBaseController {
       const existingPersonIds = new Set(existing.map((gm) => gm.personId));
       const newPersonIds = personIds.filter((id) => !existingPersonIds.has(id));
 
+      const batch = await this.repos.batch.create({ churchId: au.churchId, userId: au.id, source: "bulk-add", label: `Add ${newPersonIds.length} group members`, status: "open" });
+
       const added: GroupMember[] = [];
       for (const personId of newPersonIds) {
         const saved = await this.repos.groupMember.save({ churchId: au.churchId, groupId, personId, leader: false });
@@ -124,7 +141,8 @@ export class GroupMemberController extends MembershipBaseController {
         added.push(saved);
       }
 
-      return this.json({ success: true, addedIds: added.map((gm) => gm.personId), count: added.length });
+      await this.repos.batch.complete(au.churchId, batch.id, added.length);
+      return this.json({ success: true, addedIds: added.map((gm) => gm.personId), count: added.length, batchId: batch.id });
     });
   }
 
@@ -141,13 +159,16 @@ export class GroupMemberController extends MembershipBaseController {
       const existing = (await this.repos.groupMember.loadForGroup(au.churchId, groupId)) as any[];
       const toRemove = existing.filter((gm) => personIds.indexOf(gm.personId) !== -1);
 
+      const batch = await this.repos.batch.create({ churchId: au.churchId, userId: au.id, source: "bulk-remove", label: `Remove ${toRemove.length} group members`, status: "open" });
+
       await this.repos.groupMember.deleteForGroupAndPeople(au.churchId, groupId, toRemove.map((gm) => gm.personId));
       for (const gm of toRemove) {
         await this.repos.groupMemberHistory.log(au.churchId, groupId, gm.personId, "left");
         await WebhookDispatcher.emit(au.churchId, "group.member.removed", gm);
       }
 
-      return this.json({ success: true, removedIds: toRemove.map((gm) => gm.personId), count: toRemove.length });
+      await this.repos.batch.complete(au.churchId, batch.id, toRemove.length);
+      return this.json({ success: true, removedIds: toRemove.map((gm) => gm.personId), count: toRemove.length, batchId: batch.id });
     });
   }
 
@@ -158,7 +179,7 @@ export class GroupMemberController extends MembershipBaseController {
       if (!groupId) return this.json({ error: "groupId required" }, 400);
 
       const group: any = await this.repos.group.load(au.churchId, groupId);
-      if (!group) return this.json({ error: "Group not found" }, 404);
+      if (!group || group.archived) return this.json({ error: "Group not found" }, 404);
 
       const policy = group.joinPolicy ?? "open";
       if (policy === "closed") return this.json({ error: "Group is closed to new members" }, 403);

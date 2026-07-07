@@ -6,7 +6,8 @@ import { AuthenticatedUser } from "../auth/index.js";
 import { MembershipBaseController } from "./MembershipBaseController.js";
 import { Utils, Permissions, ChurchHelper, RoleHelper, Environment, HubspotHelper, MauticHelper, GeoHelper, PersonHelper, UserHelper } from "../helpers/index.js";
 import { Repos } from "../repositories/index.js";
-import { ArrayHelper, EmailHelper } from "@churchapps/apihelper";
+import { ArrayHelper } from "@churchapps/apihelper";
+import { TransactionalEmailHelper } from "../../../shared/helpers/TransactionalEmailHelper.js";
 
 const churchRegisterValidation = [
   body("name").notEmpty().withMessage("Select a church name"),
@@ -105,10 +106,22 @@ export class ChurchController extends MembershipBaseController {
       try {
         let result = {};
         if (req.query.subDomain !== undefined) {
-          const data = await this.repos.church.loadBySubDomain(req.query.subDomain.toString());
+          const sub = req.query.subDomain.toString();
+          const data = await this.repos.church.loadBySubDomain(sub);
           if (data) {
             const church = this.repos.church.convertToModel(data);
             result = { id: church.id, name: church.name, subDomain: church.subDomain };
+          } else {
+            // Fall back to a site subdomain — resolve to its owning church, echoing the queried slug.
+            const site = await this.repos.site.loadBySubDomain(sub);
+            if (site) {
+              const ownerData = await this.repos.church.loadById(site.churchId);
+              // Archived churches are offline — their sites must not resolve either.
+              if (ownerData && !ownerData.archivedDate) {
+                const church = this.repos.church.convertToModel(ownerData);
+                result = { id: church.id, name: church.name, subDomain: sub, siteId: site.id };
+              }
+            }
           }
         } else if (req.query.id !== undefined) {
           const data = await this.repos.church.loadById(req.query.id.toString());
@@ -133,14 +146,6 @@ export class ChurchController extends MembershipBaseController {
         const churches = await this.repos.church.deleteAbandoned(7);
         return this.json(churches, 200);
       }
-    });
-  }
-
-  @httpGet("/test")
-  public async test(req: express.Request<{}, {}, RegistrationRequest>, res: express.Response): Promise<any> {
-    return this.actionWrapperAnon(req, res, async () => {
-      HubspotHelper.register("6", "Test Church6", "John", "Doe5", "123 Main St", "Anytown", "TX", "12345", "USA", "jdoe6@gmail.com", "Test App");
-      return this.json({ success: true }, 200);
     });
   }
 
@@ -199,7 +204,6 @@ export class ChurchController extends MembershipBaseController {
         }
 
         UserHelper.replaceDomainAdminPermissions([result]);
-        UserHelper.syncCrossModulePermissions([result]);
         UserHelper.addAllReportingPermissions([result]);
 
         const churchWithAuth = await AuthenticatedUser.login([result], user);
@@ -239,6 +243,9 @@ export class ChurchController extends MembershipBaseController {
       else {
         const c = await repos.church.loadBySubDomain(church.subDomain);
         if (c !== null && c.id !== church.id) result.push("Subdomain unavailable");
+        // Church and site subdomains share one global namespace — any site hit is a collision.
+        const s = await repos.site.loadBySubDomain(church.subDomain);
+        if (s) result.push("Subdomain unavailable");
       }
     }
 
@@ -302,12 +309,17 @@ export class ChurchController extends MembershipBaseController {
           c.subDomain = c.subDomain + "2";
           // result.push("Subdomain unavailable");
           this.validateRegister(church, au);
+        } else {
+          // Site subdomains share the church namespace; selectSubDomain avoids them, this is the backstop.
+          const s = await this.repos.site.loadBySubDomain(church.subDomain);
+          if (s) result.push("Subdomain unavailable");
         }
       }
     }
     return result;
   }
 
+  // authz-exempt: open to any authenticated user — self-service church registration; caller becomes owner via RoleHelper(savedChurch.id, au.id)
   @httpPost("/add", ...churchRegisterValidation)
   public async addChurch(req: express.Request<{}, {}, RegisterChurchRequest>, res: express.Response): Promise<any> {
     return this.actionWrapper(req, res, async (au) => {
@@ -333,7 +345,7 @@ export class ChurchController extends MembershipBaseController {
 
         const postInitPromises: Promise<any>[] = [];
         if (Environment.emailOnRegistration) {
-          postInitPromises.push(EmailHelper.sendTemplatedEmail(
+          postInitPromises.push(TransactionalEmailHelper.sendTransactional(
             Environment.supportEmail,
             Environment.supportEmail,
             appName,
@@ -369,6 +381,7 @@ export class ChurchController extends MembershipBaseController {
   @httpPost("/select")
   public async select(req: express.Request<{}, {}, { churchId: string; subDomain: string }>, res: express.Response): Promise<any> {
     return this.actionWrapper(req, res, async (au) => {
+      // authz-exempt: selection target validated against au's own permissions below
       let { churchId } = req.body;
       if (req.body.subDomain && !churchId) {
         const selectedChurch: Church = await this.repos.church.loadBySubDomain(req.body.subDomain);
@@ -377,7 +390,6 @@ export class ChurchController extends MembershipBaseController {
       }
       if (!churchId) return this.json({ message: "No church specified" }, 400);
       const userChurch = await this.fetchChurchPermissions(au, churchId);
-      UserHelper.syncCrossModulePermissions([userChurch]);
       const user = await this.repos.user.load(au.id);
 
       const data = await AuthenticatedUser.login([userChurch], user);

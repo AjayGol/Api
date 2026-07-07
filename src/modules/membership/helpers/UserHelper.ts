@@ -1,7 +1,8 @@
 import { Api, LoginUserChurch, RolePermission } from "../models/index.js";
 import { Environment, permissionsList } from "./index.js";
 import { Repos } from "../repositories/index.js";
-import { ArrayHelper, EmailHelper } from "@churchapps/apihelper";
+import { ArrayHelper } from "@churchapps/apihelper";
+import { TransactionalEmailHelper } from "../../../shared/helpers/TransactionalEmailHelper.js";
 
 export class UserHelper {
   private static addAllPermissions(luc: LoginUserChurch) {
@@ -27,29 +28,6 @@ export class UserHelper {
     });
   }
 
-
-  public static syncCrossModulePermissions(lucs: LoginUserChurch[]) {
-    lucs.forEach((luc) => {
-      const has = (keyName: string) => {
-        const api = ArrayHelper.getOne(luc.apis, "keyName", keyName);
-        if (api === null) return false;
-        return ArrayHelper.getOne(ArrayHelper.getAll(api.permissions, "contentType", "Plans"), "action", "Edit") !== null;
-      };
-      const add = (keyName: string) => {
-        let api = ArrayHelper.getOne(luc.apis, "keyName", keyName);
-        if (api === null) {
-          api = { keyName, permissions: [] };
-          luc.apis.push(api);
-        }
-        const permission: RolePermission = { action: "Edit", contentType: "Plans", contentId: "" };
-        api.permissions.push(permission);
-      };
-      const inDoing = has("DoingApi");
-      const inMembership = has("MembershipApi");
-      if (inDoing && !inMembership) add("MembershipApi");
-      if (inMembership && !inDoing) add("DoingApi");
-    });
-  }
 
   private static addReportingPermissions(luc: LoginUserChurch) {
     const reportingApi = ArrayHelper.getOne(luc.apis, "keyName", "ReportingApi");
@@ -86,7 +64,6 @@ export class UserHelper {
   static async loadExpandedPermissions(userId: string, churchId: string, repos: Repos): Promise<Api[]> {
     const luc = (await repos.rolePermission.loadUserPermissionInChurch(userId, churchId)) ?? ({ apis: [] } as unknown as LoginUserChurch);
     await UserHelper.replaceDomainAdminPermissions([luc]);
-    UserHelper.syncCrossModulePermissions([luc]);
     UserHelper.addAllReportingPermissions([luc]);
     return luc.apis;
   }
@@ -100,7 +77,7 @@ export class UserHelper {
       "<p>Enter this verification code in the app to finish creating your account:</p>" +
       `<p style="font-size: 28px; font-weight: bold; letter-spacing: 6px; text-align: center; font-family: monospace; padding: 16px; background: #f3f4f6; border-radius: 6px;">${code}</p>` +
       "<p style=\"color: #6b7280; font-size: 14px;\">This code expires in 15 minutes. If you did not request an account, you can safely ignore this email.</p>";
-    return EmailHelper.sendTemplatedEmail(Environment.supportEmail, email, appName, appUrl, "Welcome to " + appName + ".", contents);
+    return TransactionalEmailHelper.sendTransactional(Environment.supportEmail, email, appName, appUrl, "Welcome to " + appName + ".", contents);
   }
 
   static sendInviteEmail(email: string, personName: string, contextName: string, churchName: string, loginLink: string, isExistingUser: boolean, inviterEmail?: string): Promise<any> {
@@ -113,7 +90,7 @@ export class UserHelper {
       "<p>You have been added to <strong>" + contextName + "</strong> at " + appName + ".</p>" +
       "<p>Click the button below to " + actionLabel.toLowerCase() + " and get started.</p>" +
       `<p><a href="${appUrl}${loginLink}" class="btn btn-primary">${actionLabel}</a></p>`;
-    return EmailHelper.sendTemplatedEmail(Environment.supportEmail, email, appName, appUrl, subject, contents, "EmailTemplate.html", inviterEmail || undefined);
+    return TransactionalEmailHelper.sendTransactional(Environment.supportEmail, email, appName, appUrl, subject, contents, "EmailTemplate.html", inviterEmail || undefined);
   }
 
   static sendForgotEmail(email: string, code: string, appName: string, appUrl: string): Promise<any> {
@@ -125,6 +102,6 @@ export class UserHelper {
       "<p>Enter this verification code in the app to reset your password:</p>" +
       `<p style="font-size: 28px; font-weight: bold; letter-spacing: 6px; text-align: center; font-family: monospace; padding: 16px; background: #f3f4f6; border-radius: 6px;">${code}</p>` +
       "<p style=\"color: #6b7280; font-size: 14px;\">This code expires in 15 minutes. If you did not request a password reset, you can safely ignore this email.</p>";
-    return EmailHelper.sendTemplatedEmail(Environment.supportEmail, email, appName, appUrl, appName + " Password Reset", contents);
+    return TransactionalEmailHelper.sendTransactional(Environment.supportEmail, email, appName, appUrl, appName + " Password Reset", contents);
   }
 }

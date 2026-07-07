@@ -36,6 +36,20 @@ export class EventController extends ContentBaseController {
     });
   }
 
+  // CA-1: the caller's own event/room requests joined with their bookings + statuses.
+  @httpGet("/requests/mine")
+  public async getMyRequests(req: express.Request<{}, {}, null>, res: express.Response): Promise<any> {
+    return this.actionWrapper(req, res, async (au) => {
+      const events = await this.repos.event.loadRequestsForPerson(au.churchId, au.personId);
+      const result = [];
+      for (const event of events) {
+        const bookings = await this.repos.eventBooking.loadForEvent(au.churchId, event.id);
+        result.push({ ...event, bookings });
+      }
+      return result;
+    });
+  }
+
   @httpGet("/pending")
   public async getPendingApproval(req: express.Request<{}, {}, null>, res: express.Response): Promise<any> {
     return this.actionWrapper(req, res, async (au) => {
@@ -49,18 +63,21 @@ export class EventController extends ContentBaseController {
     return this.actionWrapperAnon(req, res, async () => {
       let newEvents: any[] = [];
       if (req.query.groupId) {
-        const groupEvents = await this.repos.event.loadForGroup(req.query.churchId.toString(), req.query.groupId.toString());
+        // authz-exempt: public ICS feed; churchId is the published feed identifier
+        const groupEvents = await this.repos.event.loadPublicForGroup(req.query.churchId.toString(), req.query.groupId.toString());
         if (groupEvents && groupEvents.length > 0) {
           await CalendarHelper.addExceptionDates(groupEvents, this.repos);
           newEvents = this.populateEventsForICS(groupEvents);
         }
       } else if (req.query.roomId) {
+        // authz-exempt: public ICS feed; churchId is the published feed identifier
         const roomEvents = await this.repos.event.loadForRoom(req.query.churchId.toString(), req.query.roomId.toString());
         if (roomEvents && roomEvents.length > 0) {
           await CalendarHelper.addExceptionDates(roomEvents, this.repos);
           newEvents = this.populateEventsForICS(roomEvents);
         }
       } else if (req.query.curatedCalendarId) {
+        // authz-exempt: public ICS feed; churchId is the published feed identifier
         const curatedEvents = await this.repos.curatedEvent.loadForEvents(req.query.curatedCalendarId.toString(), req.query.churchId.toString());
         if (curatedEvents && curatedEvents.length > 0) {
           await CalendarHelper.addExceptionDates(curatedEvents, this.repos);
@@ -165,6 +182,7 @@ export class EventController extends ContentBaseController {
   }
 
   // Pre-save conflict check for a proposed event + room/resource bookings.
+  // authz-exempt: self-service — read-only conflict check over data scoped to au.churchId
   @httpPost("/conflicts")
   public async conflicts(req: express.Request<{}, {}, ProposedBooking>, res: express.Response): Promise<any> {
     return this.actionWrapper(req, res, async (au) => {
@@ -246,11 +264,13 @@ export class EventController extends ContentBaseController {
     });
   }
 
+  // authz-exempt: gated by resolveEvent(...) → content.edit/calendars.admin check
   @httpPost("/:id/approve")
   public async approve(@requestParam("id") id: string, req: express.Request<{}, {}, null>, res: express.Response): Promise<any> {
     return this.resolveEvent(req, res, id, "approved");
   }
 
+  // authz-exempt: gated by resolveEvent(...) → content.edit/calendars.admin check
   @httpPost("/:id/reject")
   public async reject(@requestParam("id") id: string, req: express.Request<{}, {}, null>, res: express.Response): Promise<any> {
     return this.resolveEvent(req, res, id, "rejected");
@@ -259,7 +279,10 @@ export class EventController extends ContentBaseController {
   @httpDelete("/:id")
   public async delete(@requestParam("id") id: string, req: express.Request<{}, {}, null>, res: express.Response): Promise<any> {
     return this.actionWrapper(req, res, async (au) => {
-      if (!au.checkAccess(Permissions.content.edit)) return this.json({}, 401);
+      const existing = await this.repos.event.load(au.churchId, id);
+      // CA-1: a requester may withdraw their own still-pending request.
+      const isSelfCancel = !!existing && existing.requestedBy === au.personId && existing.approvalStatus === "pending";
+      if (!au.checkAccess(Permissions.content.edit) && !isSelfCancel) return this.json({}, 401);
       else {
         await this.repos.event.delete(au.churchId, id);
         await this.repos.eventBooking.deleteForEvent(au.churchId, id);

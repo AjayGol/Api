@@ -1,5 +1,5 @@
 import express from "express";
-import { GatewayConfig, IGatewayProvider, WebhookResult, ChargeResult, SubscriptionResult } from "./IGatewayProvider.js";
+import { GatewayConfig, IGatewayProvider, WebhookResult, ChargeResult, SubscriptionResult, ProviderCapabilities } from "./IGatewayProvider.js";
 
 /**
  * Lightweight stub for feature-flagged providers that are not yet implemented.
@@ -7,6 +7,7 @@ import { GatewayConfig, IGatewayProvider, WebhookResult, ChargeResult, Subscript
  */
 export abstract class AbstractExperimentalGatewayProvider implements IGatewayProvider {
   abstract readonly name: string;
+  abstract readonly capabilities: ProviderCapabilities;
 
   protected notImplemented(method: string): never {
     throw new Error(`[${this.name}] ${method} is not implemented for this provider.`);
@@ -42,6 +43,14 @@ export abstract class AbstractExperimentalGatewayProvider implements IGatewayPro
 
   async cancelSubscription(_config: GatewayConfig, _subscriptionId: string, _reason?: string): Promise<void> {
     this.notImplemented("cancelSubscription");
+  }
+
+  async pauseSubscription(_config: GatewayConfig, _subscriptionId: string): Promise<void> {
+    this.notImplemented("pauseSubscription");
+  }
+
+  async resumeSubscription(_config: GatewayConfig, _subscriptionId: string): Promise<void> {
+    this.notImplemented("resumeSubscription");
   }
 
   async calculateFees(_amount: number, _churchId: string): Promise<number> {

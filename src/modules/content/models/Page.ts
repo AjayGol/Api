@@ -3,11 +3,15 @@ import { Section } from "./Section.js";
 export class Page {
   public id?: string;
   public churchId?: string;
+  public siteId?: string;
   public url?: string;
   public title?: string;
   public layout?: string;
   public publishedJSON?: string;
   public publishedAt?: Date;
+  public visibility?: string;
+  public groupIds?: string;
+  public metaDescription?: string;
 
   public sections?: Section[];
 }

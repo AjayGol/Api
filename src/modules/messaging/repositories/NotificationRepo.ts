@@ -22,6 +22,7 @@ export class NotificationRepo {
       link: model.link,
       deliveryMethod: model.deliveryMethod,
       triggeredByPersonId: model.triggeredByPersonId,
+      category: model.category,
       timeSent: sql`NOW()`,
       isNew: true as any
     }).execute();
@@ -50,6 +51,8 @@ export class NotificationRepo {
     return getDb().selectFrom("notifications").selectAll()
       .where("churchId", "=", churchId)
       .where("personId", "=", personId)
+      // DM shadow rows surface via messages inbox, not notifications list.
+      .where("contentType", "<>", "privateMessage")
       .orderBy("timeSent", "desc")
       .execute();
   }
@@ -88,27 +91,46 @@ export class NotificationRepo {
     await getDb().deleteFrom("notifications")
       .where("churchId", "=", churchId)
       .where("personId", "=", personId)
+      // Exclude DM shadow rows; their lifecycle is tied to message read state.
+      .where("contentType", "<>", "privateMessage")
       .execute();
   }
 
+  // Marks notification rows read; DM shadow rows are managed separately via message read state.
   public async markRead(churchId: string, personId: string) {
     await getDb().updateTable("notifications").set({
       isNew: false as any,
       deliveryMethod: "complete"
-    }).where("churchId", "=", churchId).where("personId", "=", personId).execute();
+    }).where("churchId", "=", churchId).where("personId", "=", personId).where("contentType", "<>", "privateMessage").execute();
   }
 
   public async markAllRead(churchId: string, personId: string) {
     await getDb().updateTable("notifications").set({
       isNew: false as any,
       deliveryMethod: "complete"
-    }).where("churchId", "=", churchId).where("personId", "=", personId).execute();
+    }).where("churchId", "=", churchId).where("personId", "=", personId).where("contentType", "<>", "privateMessage").execute();
+  }
+
+  // Clear DM shadow rows to retire escalation when messages inbox is opened.
+  public async markPrivateMessagesRead(churchId: string, personId: string) {
+    await getDb().updateTable("notifications").set({
+      isNew: false as any,
+      deliveryMethod: "complete"
+    }).where("churchId", "=", churchId).where("personId", "=", personId).where("contentType", "=", "privateMessage").where("isNew", "=", true as any).execute();
+  }
+
+  public async markPrivateMessageRead(churchId: string, personId: string, contentId: string) {
+    await getDb().updateTable("notifications").set({
+      isNew: false as any,
+      deliveryMethod: "complete"
+    }).where("churchId", "=", churchId).where("personId", "=", personId).where("contentType", "=", "privateMessage").where("contentId", "=", contentId).where("isNew", "=", true as any).execute();
   }
 
   public async loadForPerson(churchId: string, personId: string) {
     return getDb().selectFrom("notifications").selectAll()
       .where("churchId", "=", churchId)
       .where("personId", "=", personId)
+      .where("contentType", "<>", "privateMessage")
       .orderBy("timeSent", "desc")
       .execute();
   }
@@ -120,6 +142,8 @@ export class NotificationRepo {
         .where("churchId", "=", churchId)
         .where("personId", "=", personId)
         .where("isNew", "=", true as any)
+        // DM unread is counted by pmCount (notifyPersonId); exclude the shadow rows.
+        .where("contentType", "<>", "privateMessage")
         .as("notificationCount"),
       eb.selectFrom("privateMessages")
         .select(sql<number>`COUNT(*)`.as("pmCount"))
@@ -172,7 +196,8 @@ export class NotificationRepo {
       message: data.message,
       link: data.link,
       deliveryMethod: data.deliveryMethod,
-      triggeredByPersonId: data.triggeredByPersonId
+      triggeredByPersonId: data.triggeredByPersonId,
+      category: data.category
     };
   }
 

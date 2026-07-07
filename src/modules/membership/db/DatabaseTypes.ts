@@ -1,16 +1,14 @@
 import type {
-  AccessLog, Answer, ApiKey, AssociatedGroup, AuditLog, Campus, Church, ClientError, Domain, Form,
+  AccessLog, Answer, ApiKey, AssociatedGroup, AuditLog, Batch, Campus, Church, ClientError, Domain, Form,
   FormSubmission, Group, GroupJoinRequest, GroupMember, GroupMemberHistory, Household, List, ListMember, MemberPermission,
+  HouseholdPickupPerson,
   OAuthClient, OAuthCode, OAuthDeviceCode, OAuthRelaySession, OAuthToken,
-  Question, Role, RoleMember, RolePermission, Setting, User, UserChurch,
+  PersonField, PersonFieldValue,
+  Question, Role, RoleMember, RolePermission, Setting, Site, User, UserChurch,
   VisibilityPreference, Webhook, WebhookDelivery
 } from "../models/index.js";
 
-/**
- * The people table stores flattened name/contact columns rather than
- * the composite Name/ContactInfo objects used in the Person model.
- * rowToModel() in PersonRepo maps these back to the Person model shape.
- */
+/** people table flattens name/contact into columns; rowToModel() restores Person shape. */
 export interface PeopleTable {
   id?: string;
   churchId?: string;
@@ -26,6 +24,8 @@ export interface PeopleTable {
   maritalStatus?: string;
   anniversary?: Date;
   membershipStatus?: string;
+  grade?: string;
+  school?: string;
   homePhone?: string;
   mobilePhone?: string;
   workPhone?: string;
@@ -53,17 +53,19 @@ export interface MembershipDatabase {
   apiKeys: ApiKey;
   associatedGroups: AssociatedGroup;
   auditLogs: AuditLog;
+  batches: Batch;
   campuses: Campus;
   churches: Omit<Church, "settings">;
   clientErrors: ClientError;
   domains: Domain;
   forms: Omit<Form, "action" | "questions"> & { removed?: boolean; archived?: boolean };
   formSubmissions: Omit<FormSubmission, "form" | "questions" | "answers">;
-  groups: Omit<Group, "labelArray" | "memberCount" | "importKey"> & { removed?: boolean };
+  groups: Omit<Group, "labelArray" | "memberCount"> & { removed?: boolean };
   groupMembers: Omit<GroupMember, "person" | "group">;
   groupMemberHistory: GroupMemberHistory;
   groupJoinRequests: Omit<GroupJoinRequest, "person" | "group">;
   households: Household;
+  householdPickupPeople: HouseholdPickupPerson;
   lists: Omit<List, "conditions" | "createdByPersonName" | "rules" | "actions" | "autoRefresh" | "notifyOnChange"> & {
     conditions: string;
     rules?: string;
@@ -81,11 +83,14 @@ export interface MembershipDatabase {
   oAuthRelaySessions: OAuthRelaySession;
   oAuthTokens: OAuthToken;
   people: PeopleTable;
+  personFields: PersonField;
+  personFieldValues: PersonFieldValue;
   questions: Question & { removed?: boolean };
   roles: Role;
   roleMembers: Omit<RoleMember, "user">;
   rolePermissions: RolePermission;
   settings: Setting;
+  sites: Site;
   users: Omit<User, "jwt"> & { password?: string };
   userChurches: UserChurch;
   visibilityPreferences: VisibilityPreference;

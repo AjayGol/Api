@@ -23,20 +23,26 @@ const safe = async (label: string, fn: () => Promise<unknown>): Promise<void> =>
 
 const runThirtyMinute = async (): Promise<void> => {
   const { NotificationHelper } = await import("../../modules/messaging/helpers/NotificationHelper.js");
+  const { scanReminders } = await import("../../modules/messaging/helpers/ReminderBootstrap.js");
+  const { SocketHelper } = await import("../../modules/messaging/helpers/SocketHelper.js");
   const repos = await RepoManager.getRepos<any>("messaging");
   NotificationHelper.init(repos);
   await NotificationHelper.escalateDelivery();
   await NotificationHelper.sendEmailNotifications("individual");
+  await scanReminders(repos); // reminder dispatcher — Pattern A, no new timer
+  await SocketHelper.reapStaleConnections(repos);
 };
 
 const runMidnight = async (): Promise<void> => {
   const { NotificationHelper } = await import("../../modules/messaging/helpers/NotificationHelper.js");
-  const { AutomationHelper } = await import("../../modules/bridge/helpers/AutomationHelper.js");
   const messagingRepos = await RepoManager.getRepos<any>("messaging");
   NotificationHelper.init(messagingRepos);
-  await AutomationHelper.remindServiceRequests();
   const contentRepos = await RepoManager.getRepos<any>("content");
   await contentRepos.streamingService.advanceRecurringServices();
+  const { expandReminders } = await import("../../modules/messaging/helpers/ReminderBootstrap.js");
+  await expandReminders(messagingRepos); // reminder expander — Pattern A
+  const { GradePromotionHelper } = await import("../../modules/membership/helpers/GradePromotionHelper.js");
+  await GradePromotionHelper.checkPromotions();
   await NotificationHelper.sendEmailNotifications("daily");
 };
 

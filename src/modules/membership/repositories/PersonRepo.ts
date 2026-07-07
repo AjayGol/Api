@@ -14,13 +14,12 @@ export class PersonRepo {
   }
 
   private prepareDateFields(person: Person) {
-    (person as any).birthDate = DateHelper.toMysqlDateOnly(person.birthDate);  // date-only field
-    (person as any).anniversary = DateHelper.toMysqlDateOnly(person.anniversary);  // date-only field
+    (person as any).birthDate = DateHelper.toMysqlDateOnly(person.birthDate);
+    (person as any).anniversary = DateHelper.toMysqlDateOnly(person.anniversary);
     (person as any).photoUpdated = DateHelper.toMysqlDate(person.photoUpdated);
   }
 
   private prepareContactFields(person: Person) {
-    // Map contact info fields to flat structure
     (person as any).homePhone = person.contactInfo?.homePhone;
     (person as any).mobilePhone = person.contactInfo?.mobilePhone;
     (person as any).workPhone = person.contactInfo?.workPhone;
@@ -31,7 +30,6 @@ export class PersonRepo {
     (person as any).state = person.contactInfo?.state;
     (person as any).zip = person.contactInfo?.zip;
 
-    // Map name fields to flat structure
     (person as any).displayName = person.name?.display;
     (person as any).firstName = person.name?.first;
     (person as any).middleName = person.name?.middle;
@@ -61,6 +59,8 @@ export class PersonRepo {
       maritalStatus: person.maritalStatus,
       anniversary: p.anniversary,
       membershipStatus: person.membershipStatus,
+      grade: person.grade,
+      school: person.school,
       homePhone: p.homePhone,
       mobilePhone: p.mobilePhone,
       workPhone: p.workPhone,
@@ -78,6 +78,7 @@ export class PersonRepo {
       optedOut: person.optedOut,
       nametagNotes: person.nametagNotes,
       donorNumber: person.donorNumber,
+      importKey: person.importKey,
       removed: false
     }).execute();
     return person;
@@ -100,6 +101,8 @@ export class PersonRepo {
       maritalStatus: person.maritalStatus,
       anniversary: p.anniversary,
       membershipStatus: person.membershipStatus,
+      grade: person.grade,
+      school: person.school,
       homePhone: p.homePhone,
       mobilePhone: p.mobilePhone,
       workPhone: p.workPhone,
@@ -116,7 +119,8 @@ export class PersonRepo {
       conversationId: person.conversationId,
       optedOut: person.optedOut,
       nametagNotes: person.nametagNotes,
-      donorNumber: person.donorNumber
+      donorNumber: person.donorNumber,
+      importKey: person.importKey
     }).where("id", "=", person.id).where("churchId", "=", person.churchId).execute();
     return person;
   }
@@ -135,8 +139,8 @@ export class PersonRepo {
     await getDb().updateTable("people").set(fields).where("id", "in", ids).where("churchId", "=", churchId).execute();
   }
 
-  public async updateOptedOut(personId: string, optedOut: boolean) {
-    await getDb().updateTable("people").set({ optedOut: optedOut as any }).where("id", "=", personId).execute();
+  public async updateOptedOut(churchId: string, personId: string, optedOut: boolean) {
+    await getDb().updateTable("people").set({ optedOut: optedOut as any }).where("id", "=", personId).where("churchId", "=", churchId).execute();
   }
 
   public async updateHousehold(person: Person) {
@@ -200,7 +204,6 @@ export class PersonRepo {
       .where("removed", "=", false as any);
     if (filterOptedOut) q = q.where((eb) => eb.or([eb("optedOut", "=", false as any), eb("optedOut", "is", null)]));
     const subResult = await q.orderBy("id", "desc").limit(25).execute();
-    // Sort by lastName, firstName in JS to match original subquery behavior
     subResult.sort((a: any, b: any) => {
       const lastCmp = (a.lastName || "").localeCompare(b.lastName || "");
       if (lastCmp !== 0) return lastCmp;
@@ -279,7 +282,6 @@ export class PersonRepo {
   public async loadDemographics(churchId: string) {
     const db = getDb();
 
-    // Direct free-text columns: null/blank buckets to "Unassigned".
     const countByColumn = async (column: "gender" | "membershipStatus" | "maritalStatus") => {
       const bucket = sql<string>`COALESCE(NULLIF(TRIM(${sql.ref(column)}), ''), 'Unassigned')`;
       const rows = await db.selectFrom("people")
@@ -294,7 +296,6 @@ export class PersonRepo {
 
     const [gender, membershipStatus, maritalStatus] = await Promise.all([countByColumn("gender"), countByColumn("membershipStatus"), countByColumn("maritalStatus")]);
 
-    // Age groups (people with a birthDate only), split by gender so the bar can stack.
     const ageRows = await sql`SELECT
         CASE
           WHEN age BETWEEN 0 AND 3 THEN '0-3'
@@ -322,15 +323,11 @@ export class PersonRepo {
     (ageRows.rows as any[]).forEach((r) => {
       const bucket = ageMap[r.ageGroup];
       if (!bucket) return;
-      // Anything that isn't male/female (custom values, blanks) rolls into "unassigned".
       const g = String(r.gender).toLowerCase();
       const key = g === "female" ? "female" : g === "male" ? "male" : "unassigned";
       bucket[key] += Number(r.count);
     });
 
-    // Campus distribution: join to campuses for the display name; NULL campusId
-    // rolls into "Unassigned". The campus id is returned so the chart can drill
-    // into a People search by campusId.
     const campusRows = await sql<{ name: string; id: string | null; count: number }>`
       SELECT COALESCE(c.name, 'Unassigned') AS name, p.campusId AS id, COUNT(*) AS count
       FROM people p
@@ -378,6 +375,8 @@ export class PersonRepo {
       nametagNotes: row.nametagNotes,
       donorNumber: row.donorNumber,
       membershipStatus: row.membershipStatus,
+      grade: row.grade,
+      school: row.school,
       photoUpdated: row.photoUpdated ? new Date(row.photoUpdated) : undefined,
       id: row.id,
       churchId: row.churchId,

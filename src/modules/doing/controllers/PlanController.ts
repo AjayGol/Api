@@ -2,10 +2,12 @@ import express from "express";
 import { controller, httpDelete, httpGet, httpPost, requestParam } from "inversify-express-utils";
 import { UniqueIdHelper } from "@churchapps/apihelper";
 import { PlanHelper } from "../helpers/PlanHelper.js";
+import { MatrixEmailHelper } from "../helpers/MatrixEmailHelper.js";
 import { Assignment, Plan, PlanItem, PlanItemTime, Position, Time } from "../models/index.js";
 import { DoingBaseController } from "./DoingBaseController.js";
 import { PlanAuth } from "../../../shared/helpers/index.js";
 import { getMembershipModuleGateway } from "../../../shared/modules/index.js";
+import { InternalEventBus } from "../../../shared/events/InternalEventBus.js";
 
 @controller("/doing/plans")
 export class PlanController extends DoingBaseController {
@@ -235,6 +237,18 @@ export class PlanController extends DoingBaseController {
     });
   }
 
+  @httpPost("/notifyRange")
+  public async notifyRange(req: express.Request<{}, {}, { startDate?: string; endDate?: string; ministryId?: string; planTypeId?: string }>, res: express.Response): Promise<any> {
+    return this.actionWrapper(req, res, async (au) => {
+      const { startDate, endDate, ministryId, planTypeId } = req.body || {};
+      if (!startDate || !endDate) return this.json({ error: "Missing required parameters: startDate, endDate" }, 400);
+      if (!ministryId) return this.json({ error: "ministryId is required" }, 400);
+      if (!await PlanAuth.canEditMinistry(au, ministryId)) return this.json({}, 401);
+      const rows = (await this.repos.assignment.loadOverviewByDateRange(au.churchId, startDate, endDate, ministryId, planTypeId)) as any[];
+      return await MatrixEmailHelper.sendConsolidated(au.churchId, rows, ministryId);
+    });
+  }
+
   @httpPost("/copy/:id")
   public async copy(@requestParam("id") id: string, req: express.Request<{}, {}, Plan & { copyMode?: string; copyServiceOrder?: boolean }>, res: express.Response): Promise<any> {
     return this.actionWrapper(req, res, async (au) => {
@@ -290,7 +304,11 @@ export class PlanController extends DoingBaseController {
         if (plan.serviceDate) {
           plan.serviceDate = new Date(plan.serviceDate);
         }
-        promises.push(this.repos.plan.save(plan));
+        // Sync reminder occurrences (planType-scoped serving reminders) without waiting for midnight.
+        promises.push(this.repos.plan.save(plan).then(async (saved) => {
+          await InternalEventBus.publish(au.churchId, "plan.updated", saved);
+          return saved;
+        }));
       });
       const result = await Promise.all(promises);
 
@@ -309,6 +327,7 @@ export class PlanController extends DoingBaseController {
       await this.repos.position.deleteByPlanId(au.churchId, id);
       await this.repos.planItem.deleteByPlanId(au.churchId, id);
       await this.repos.plan.delete(au.churchId, id);
+      await InternalEventBus.publish(au.churchId, "plan.destroyed", { id });
       return {};
     });
   }

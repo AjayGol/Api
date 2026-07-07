@@ -1,9 +1,7 @@
-/**
- * Consolidated exports for shared infrastructure
- * Provides a single import point for infrastructure components
- */
+// Single import point for shared infrastructure components
 
 export { KyselyPool } from "./KyselyPool.js";
 export { RepoManager } from "./RepoManager.js";
 export { CustomAuthProvider } from "./CustomAuthProvider.js";
 export { BaseController } from "./BaseController.js";
+export { BatchUndoHelper } from "./BatchUndoHelper.js";

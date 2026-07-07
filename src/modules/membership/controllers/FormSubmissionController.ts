@@ -2,9 +2,11 @@ import { controller, httpPost, httpGet, requestParam, httpDelete } from "inversi
 import express from "express";
 import { MembershipBaseController } from "./MembershipBaseController.js";
 import { FormSubmission, Answer, Form, Church } from "../models/index.js";
-import { Permissions, EmailHelper, Environment } from "../helpers/index.js";
+import { Permissions, Environment, ConversationalFormHelper } from "../helpers/index.js";
+import type { FormContact } from "../helpers/index.js";
 import { MemberPermission, Person } from "../models/index.js";
 import { WebhookDispatcher } from "../../../shared/webhooks/index.js";
+import { TransactionalEmailHelper } from "../../../shared/helpers/TransactionalEmailHelper.js";
 import axios from "axios";
 
 @controller("/membership/formsubmissions")
@@ -54,6 +56,7 @@ export class FormSubmissionController extends MembershipBaseController {
     });
   }
 
+  // authz-exempt: open form submission — public forms accept any submitter; restricted forms gated by this.formAccess(au, formId), churchId derived from the loaded form not the request
   @httpPost("/")
   public async save(req: express.Request<{}, {}, FormSubmission[]>, res: express.Response): Promise<any> {
     return this.actionWrapper(req, res, async (au) => {
@@ -71,10 +74,29 @@ export class FormSubmissionController extends MembershipBaseController {
           } else {
             if (!churchId) churchId = form.churchId;
             if (!churchId && au) churchId = au.churchId;
-            if (form.restricted && !this.formAccess(au, formId)) {
+            if (form.restricted && !(await this.formAccess(au, formId))) {
               results.push({ error: `You're not allowed to submit ${form.name}` });
             } else {
               formSubmission.churchId = churchId;
+
+              const wantsPerson = form.autoCreatePerson === true;
+              const wantsFollowUp = !!(form.followUpSubject && form.followUpBody);
+              let contact: FormContact = null;
+              let followUpFirstName: string = null;
+              if (wantsPerson || wantsFollowUp) {
+                const questions = this.repos.question.convertAllToModel(churchId, (await this.repos.question.loadForForm(churchId, formId)) as any[]);
+                contact = ConversationalFormHelper.extractContact(questions, formSubmission.answers || []);
+                followUpFirstName = contact?.firstName;
+                if (wantsPerson && contact?.email && !formSubmission.contentId) {
+                  const person = await ConversationalFormHelper.findOrCreatePerson(this.repos, churchId, contact);
+                  if (person) {
+                    formSubmission.contentType = "person";
+                    formSubmission.contentId = person.id;
+                    followUpFirstName = person.name?.first || contact.firstName;
+                  }
+                }
+              }
+
               const savedSubmissions = await this.repos.formSubmission.save(formSubmission);
 
               const answerPromises: Promise<Answer>[] = [];
@@ -92,7 +114,19 @@ export class FormSubmissionController extends MembershipBaseController {
               // subscribes to this event (form.submission.created) on the internal bus.
               await WebhookDispatcher.emit(churchId, "form.submission.created", savedSubmissions);
 
-              await this.sendEmails(formSubmission, form, churchId);
+              try {
+                await this.sendEmails(formSubmission, form, churchId);
+              } catch (err) {
+                console.error("Form submission notifications failed (non-fatal):", err);
+              }
+
+              if (wantsFollowUp && contact?.email) {
+                try {
+                  await this.sendFollowUp(churchId, contact.email, followUpFirstName, form.followUpSubject, form.followUpBody);
+                } catch (err) {
+                  console.error("Form follow-up email failed (non-fatal):", err);
+                }
+              }
             }
           }
         }
@@ -125,13 +159,21 @@ export class FormSubmissionController extends MembershipBaseController {
           const contents = "<table role=\"presentation\" style=\"text-align: left;\" cellspacing=\"8\" width=\"80%\"><tablebody>" + contentRows.join(" ") + "</tablebody></table>";
           const promises: Promise<any>[] = [];
           (people as any[]).forEach((p: Person) => {
-            if (p.email) promises.push(EmailHelper.sendTemplatedEmail(Environment.supportEmail, p.email, church.name, Environment.b1AdminRoot, "New Submissions for " + form.name, contents));
+            if (p.email) promises.push(TransactionalEmailHelper.sendTransactional(Environment.supportEmail, p.email, church.name, Environment.b1AdminRoot, "New Submissions for " + form.name, contents));
           });
           promises.push(this.sendNotifications(churchId, form, ids));
           await Promise.all(promises);
         }
       }
     }
+  }
+
+  private async sendFollowUp(churchId: string, email: string, firstName: string, subject: string, body: string) {
+    const church: Church = await this.repos.church.loadById(churchId);
+    const tokens = { firstName, churchName: church?.name };
+    const resolvedSubject = ConversationalFormHelper.applyTokens(subject, tokens);
+    const resolvedBody = ConversationalFormHelper.applyTokens(body, tokens);
+    await TransactionalEmailHelper.sendTransactional(Environment.supportEmail, email, church?.name, Environment.b1AdminRoot, resolvedSubject, resolvedBody, "ChurchEmailTemplate.html");
   }
 
   private async sendNotifications(churchId: string, form: Form, peopleIds: string[]) {

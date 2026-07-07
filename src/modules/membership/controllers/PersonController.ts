@@ -6,15 +6,17 @@ import { Repos } from "../repositories/index.js";
 import { FormSubmission, Form } from "../models/index.js";
 import { BulkPersonDeleteRequest, BulkPersonUpdateRequest } from "../models/requests.js";
 import { ArrayHelper, FileStorageHelper } from "@churchapps/apihelper";
-import { Environment, Permissions, PersonConditionHelper, PersonHelper, UserChurchHelper } from "../helpers/index.js";
+import { Environment, Permissions, PersonConditionHelper, PersonHelper, UserChurchHelper, ListRuleHelper } from "../helpers/index.js";
 import { WebhookDispatcher } from "../../../shared/webhooks/index.js";
-import { AuthenticatedUser, EmailHelper } from "@churchapps/apihelper";
+import { AuthenticatedUser } from "@churchapps/apihelper";
+import { TransactionalEmailHelper } from "../../../shared/helpers/TransactionalEmailHelper.js";
 
 @controller("/membership/people")
 export class PersonController extends MembershipBaseController {
   @httpPost("/guest-register")
   public async guestRegister(req: express.Request<{}, {}, { churchId: string, members: { firstName: string, lastName: string, email?: string, phone?: string }[] }>, res: express.Response): Promise<any> {
     return this.actionWrapperAnon(req, res, async () => {
+      // authz-exempt: anon endpoint; churchId is the public registration target
       const { churchId, members } = req.body;
       if (!churchId) return this.json({ error: "churchId is required" }, 400);
       if (!members || !Array.isArray(members) || members.length === 0) return this.json({ error: "At least one member is required" }, 400);
@@ -46,18 +48,26 @@ export class PersonController extends MembershipBaseController {
   @httpPost("/public/email")
   public async publicEmail(req: express.Request<{}, {}, any>, res: express.Response): Promise<any> {
     return this.actionWrapperAnon(req, res, async () => {
+      // authz-exempt: anon contact endpoint; churchId is the public target church
       const churchId = req.body.churchId;
       const personId = req.body.personId;
-      const subject = req.body.subject;
-      const body = req.body.body;
+      // Escape attacker-supplied subject/body before they're injected raw into the HTML email template (anon endpoint).
+      // The body is allowed to keep simple <br> line breaks (the legit contact-group-leader form sends those); everything else is neutralized.
+      const subject = this.escapeHtml(req.body.subject);
+      const body = this.escapeHtml(req.body.body).replace(/&lt;br\s*\/?&gt;/gi, "<br />");
       const appName = req.body.appName;
 
       const person: Person = await this.repos.person.load(churchId, personId);
       if (!person?.email) return this.denyAccess(["No email address"]);
 
-      await EmailHelper.sendTemplatedEmail(Environment.supportEmail, person.email, appName, null, subject, body);
+      await TransactionalEmailHelper.sendTransactional(Environment.supportEmail, person.email, appName, null, subject, body);
       return { success: true };
     });
+  }
+
+  private escapeHtml(value: unknown): string {
+    if (value === null || value === undefined) return "";
+    return String(value).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;").replace(/'/g, "&#39;");
   }
 
   @httpGet("/timeline")
@@ -127,6 +137,7 @@ export class PersonController extends MembershipBaseController {
   @httpPost("/loadOrCreate")
   public async loadOrCreate(req: express.Request<{}, {}, any>, res: express.Response): Promise<any> {
     return this.actionWrapperAnon(req, res, async () => {
+      // authz-exempt: anon endpoint; churchId is the public target church
       const { churchId, email, firstName, lastName } = req.body;
       const person: Person = await PersonHelper.getPerson(churchId, email, firstName, lastName, false);
       return { id: person.id, name: person.name, contactInfo: person.contactInfo };
@@ -358,7 +369,11 @@ export class PersonController extends MembershipBaseController {
       if (!au.checkAccess(Permissions.people.view) && !(await this.isMember(au.membershipStatus))) return this.json({}, 401);
       else {
         let data: any[] = (await this.repos.person.loadAll(au.churchId)) as any[];
-        data = PersonConditionHelper.apply(data, req.body);
+        const conditions = req.body ?? [];
+        const fieldConditions = conditions.filter((c) => typeof c.field === "string" && c.field.startsWith("personField_"));
+        const standardConditions = conditions.filter((c) => !(typeof c.field === "string" && c.field.startsWith("personField_")));
+        if (fieldConditions.length) data = await ListRuleHelper.filterByFieldConditions(au.churchId, data, fieldConditions, this.repos);
+        data = PersonConditionHelper.apply(data, standardConditions);
         const result = this.repos.person.convertAllToModelWithPermissions(au.churchId, data, au.checkAccess(Permissions.people.edit));
         return await this.filterPeople(result, au);
       }
@@ -421,7 +436,10 @@ export class PersonController extends MembershipBaseController {
       const missingIds = personIds.filter((id) => existingIds.indexOf(id) === -1);
       if (missingIds.length > 0) return this.json({ error: "Some people were not found", missingIds }, 404);
 
-      return this.deletePeople(au.churchId, existingIds);
+      const batch = await this.repos.batch.create({ churchId: au.churchId, userId: au.id, source: "bulk-delete", label: `Bulk delete ${existingIds.length} people`, status: "open" });
+      const resp = await this.deletePeople(au.churchId, existingIds, batch.id);
+      await this.repos.batch.complete(au.churchId, batch.id, existingIds.length);
+      return resp;
     });
   }
 
@@ -433,7 +451,7 @@ export class PersonController extends MembershipBaseController {
       const personIds = Array.isArray(req.body?.personIds) ? ArrayHelper.getUnique(req.body.personIds.filter((id) => typeof id === "string").map((id) => id.trim()).filter(Boolean)) : [];
       if (personIds.length === 0) return this.json({ error: "personIds is required" }, 400);
 
-      const allowedFields = ["membershipStatus", "maritalStatus", "gender", "optedOut", "campusId"];
+      const allowedFields = ["membershipStatus", "maritalStatus", "gender", "optedOut", "campusId", "grade", "school"];
       const updates: Record<string, any> = {};
       const rawUpdates = req.body?.updates || {};
       allowedFields.forEach((field) => {
@@ -448,17 +466,20 @@ export class PersonController extends MembershipBaseController {
       const missingIds = personIds.filter((id) => existingIds.indexOf(id) === -1);
       if (missingIds.length > 0) return this.json({ error: "Some people were not found", missingIds }, 404);
 
+      const batch = await this.repos.batch.create({ churchId: au.churchId, userId: au.id, source: "bulk-update", label: `Bulk update ${existingIds.length} people`, status: "open" });
+
       await this.repos.person.updateFieldsByIds(au.churchId, existingIds, updates);
 
       for (const person of existingPeople) {
         await WebhookDispatcher.emit(au.churchId, "person.updated", { ...person, ...updates, churchId: au.churchId });
       }
 
-      return this.json({ success: true, updatedIds: existingIds, count: existingIds.length });
+      await this.repos.batch.complete(au.churchId, batch.id, existingIds.length);
+      return this.json({ success: true, updatedIds: existingIds, count: existingIds.length, batchId: batch.id });
     });
   }
 
-  private async deletePeople(churchId: string, personIds: string[]) {
+  private async deletePeople(churchId: string, personIds: string[], batchId?: string) {
     if (personIds.length === 1) {
       await this.repos.person.delete(churchId, personIds[0]);
     } else {
@@ -468,7 +489,7 @@ export class PersonController extends MembershipBaseController {
     for (const id of personIds) await WebhookDispatcher.emit(churchId, "person.destroyed", { id, churchId });
 
     await this.repos.household.deleteUnused(churchId);
-    return this.json({ success: true, deletedIds: personIds, count: personIds.length });
+    return this.json({ success: true, deletedIds: personIds, count: personIds.length, batchId });
   }
 
   private async savePhoto(churchId: string, person: Person) {

@@ -1,7 +1,6 @@
-import { EmailHelper } from "@churchapps/apihelper";
 import { RepoManager } from "../infrastructure/RepoManager.js";
-import { Environment } from "../helpers/Environment.js";
 import { MergeFieldHelper } from "../../modules/messaging/helpers/MergeFieldHelper.js";
+import { NotificationHelper } from "../../modules/messaging/helpers/NotificationHelper.js";
 
 interface EmailRecipient {
   firstName?: string;
@@ -17,9 +16,22 @@ export interface MessagingModuleGateway {
   loadNotificationPreferencesByPerson(churchId: string, personId: string): Promise<any[]>;
   loadPrivateMessagesByPerson(churchId: string, personId: string): Promise<any[]>;
   createNotifications(notifications: any[]): Promise<any[]>;
-  // Render a saved EmailTemplate (merge fields resolved against recipient + church) and send it.
-  // Returns false when the template is missing or the recipient has no email.
-  sendTemplatedEmail(churchId: string, templateId: string, recipient: EmailRecipient, churchName: string, subjectOverride?: string): Promise<boolean>;
+  // Render a saved EmailTemplate and send through notification funnel; returns false if template missing or no email.
+  sendTemplatedEmail(churchId: string, personId: string, templateId: string, recipient: EmailRecipient, churchName: string, subjectOverride?: string): Promise<boolean>;
+  // Ad-hoc bulk SMS (pre-filtered recipients, capped at 500); returns { ok: false, reason: "no_provider" } if no provider.
+  sendBulkText(churchId: string, recipients: BulkTextRecipient[], message: string, context?: string): Promise<BulkTextResult>;
+}
+
+export interface BulkTextRecipient {
+  personId?: string;
+  phoneNumber: string;
+}
+
+export interface BulkTextResult {
+  ok: boolean;
+  reason?: string;
+  sent?: number;
+  failed?: number;
 }
 
 class MessagingModuleGatewayDb implements MessagingModuleGateway {
@@ -48,7 +60,7 @@ class MessagingModuleGatewayDb implements MessagingModuleGateway {
     return Promise.all(notifications.map((n) => repos.notification.save(n)));
   }
 
-  public async sendTemplatedEmail(churchId: string, templateId: string, recipient: EmailRecipient, churchName: string, subjectOverride?: string): Promise<boolean> {
+  public async sendTemplatedEmail(churchId: string, personId: string, templateId: string, recipient: EmailRecipient, churchName: string, subjectOverride?: string): Promise<boolean> {
     if (!recipient?.email) return false;
     const repos = await this.repos();
     const template = await repos.emailTemplate.loadById(churchId, templateId);
@@ -56,8 +68,73 @@ class MessagingModuleGatewayDb implements MessagingModuleGateway {
     const church = { name: churchName };
     const subject = MergeFieldHelper.resolve(subjectOverride || template.subject || "", recipient, church);
     const body = MergeFieldHelper.resolve(template.htmlContent || "", recipient, church);
-    await EmailHelper.sendTemplatedEmail(Environment.supportEmail, recipient.email, churchName || "B1", "", subject, body, "ChurchEmailTemplate.html");
+    await NotificationHelper.createNotifications([personId], churchId, "task", templateId, subject, undefined, undefined, {
+      category: "announcements",
+      deliveryStartLevel: 2,
+      emailImmediate: true,
+      emailByPerson: { [personId]: { subject, html: body } }
+    });
     return true;
+  }
+
+  public async sendBulkText(churchId: string, recipients: BulkTextRecipient[], message: string, _context?: string): Promise<BulkTextResult> {
+    const capped = recipients.slice(0, 500);
+    if (capped.length === 0) return { ok: true, sent: 0, failed: 0 };
+
+    const repos = await this.repos();
+    const config = await this.getTextingConfig(repos, churchId);
+    if (!config) return { ok: false, reason: "no_provider" };
+
+    // Dynamic import keeps the texting provider dep out of this module's eager load graph.
+    const { getProvider } = await import("@churchapps/texting");
+    const provider = getProvider(config.providerName);
+
+    const phones = capped.map((r) => r.phoneNumber);
+    const results = await provider.sendBulk(config, phones, message);
+    const successCount = results.filter((r: any) => r.success).length;
+    const failCount = results.length - successCount;
+
+    const savedSentText = await repos.sentText.save({
+      churchId,
+      groupId: null,
+      message,
+      recipientCount: capped.length,
+      successCount,
+      failCount
+    });
+
+    const logPromises: Promise<any>[] = [];
+    capped.forEach((r, i) => {
+      logPromises.push(repos.deliveryLog.save({
+        churchId,
+        personId: r.personId,
+        contentType: "sentText",
+        contentId: savedSentText.id,
+        deliveryMethod: "sms",
+        deliveryAddress: r.phoneNumber,
+        success: results[i]?.success ?? false,
+        errorMessage: results[i]?.error
+      }));
+    });
+    await Promise.allSettled(logPromises);
+
+    return { ok: true, sent: successCount, failed: failCount };
+  }
+
+  private async getTextingConfig(repos: any, churchId: string): Promise<any | null> {
+    const { EncryptionHelper } = await import("@churchapps/apihelper");
+    const providers = await repos.textingProvider.loadByChurchId(churchId);
+    const list = repos.textingProvider.convertAllToModel(providers as any[]);
+    if (!list.length) return null;
+    const p = list[0];
+    if (!p.enabled) return null;
+    return {
+      providerName: p.provider,
+      churchId,
+      apiKey: p.apiKey ? EncryptionHelper.decrypt(p.apiKey) : "",
+      apiSecret: p.apiSecret ? EncryptionHelper.decrypt(p.apiSecret) : "",
+      fromNumber: p.fromNumber
+    };
   }
 }
 

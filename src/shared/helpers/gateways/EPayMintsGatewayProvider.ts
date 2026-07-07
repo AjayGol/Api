@@ -2,10 +2,32 @@ import express from "express";
 import Axios from "axios";
 import { EPayMintsHelper } from "../EPayMintsHelper.js";
 import { Environment } from "../Environment.js";
-import { IGatewayProvider, WebhookResult, ChargeResult, SubscriptionResult, GatewayConfig } from "./IGatewayProvider.js";
+import { IGatewayProvider, WebhookResult, ChargeResult, SubscriptionResult, GatewayConfig, ProviderCapabilities } from "./IGatewayProvider.js";
 
 export class EPayMintsGatewayProvider implements IGatewayProvider {
   readonly name = "epaymints";
+
+  readonly capabilities: ProviderCapabilities = {
+    supportsOneTimePayments: true,
+    supportsSubscriptions: false,
+    supportsVault: false,
+    supportsACH: true,
+    supportsRefunds: false,
+    supportsPartialRefunds: false,
+    supportsWebhooks: false,
+    supportsOrders: false,
+    supportedPaymentMethods: ["card", "ach"],
+    supportedCurrencies: ["usd"],
+    requiresPlansForSubscriptions: false,
+    requiresCustomerForSubscription: false,
+    supportsInstantCapture: true,
+    supportsManualCapture: false,
+    supportsSCA: false,
+    maxRefundWindow: 90,
+    minTransactionAmount: 100, // $1.00
+    maxTransactionAmount: 10000000, // $100,000.00
+    notes: ["Webhooks limited; polling recommended", "ACH available via tokenised transactions"]
+  };
 
   async createWebhookEndpoint(_config: GatewayConfig, _webhookUrl: string): Promise<{ id: string }> {
     // TODO: Implement ePayMints webhook creation if supported
@@ -110,6 +132,14 @@ export class EPayMintsGatewayProvider implements IGatewayProvider {
 
   async cancelSubscription(_config: GatewayConfig, _subscriptionId: string, _reason?: string): Promise<void> {
     throw new Error("ePayMints does not support subscription cancellation");
+  }
+
+  async pauseSubscription(_config: GatewayConfig, _subscriptionId: string): Promise<void> {
+    throw new Error("ePayMints does not support subscription pausing");
+  }
+
+  async resumeSubscription(_config: GatewayConfig, _subscriptionId: string): Promise<void> {
+    throw new Error("ePayMints does not support subscription resuming");
   }
 
   async calculateFees(amount: number, churchId: string): Promise<number> {

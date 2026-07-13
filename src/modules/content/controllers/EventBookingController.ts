@@ -38,7 +38,8 @@ export class EventBookingController extends ContentBaseController {
         const groupIds = await this.loadRequesterGroupIds(au.churchId, au.personId);
         pending = pending.filter((row: any) => groupIds.includes(row.roomId ? row.roomApprovalGroupId : row.resourceApprovalGroupId));
       }
-      for (const row of pending) row.conflicts = await this.computeConflicts(au.churchId, row);
+      const timeZone = (await getMembershipModuleGateway().loadChurch(au.churchId))?.timeZone;
+      for (const row of pending) row.conflicts = await this.computeConflicts(au.churchId, row, timeZone);
       return pending;
     });
   }
@@ -133,12 +134,12 @@ export class EventBookingController extends ContentBaseController {
   }
 
   // Conflicts surfaced on each pending row so the inbox can flag double-bookings before approval.
-  private async computeConflicts(churchId: string, row: any) {
-    const windowStart = new Date();
-    const windowEnd = new Date();
-    windowEnd.setFullYear(windowEnd.getFullYear() + 1);
+  // timeZone is loaded once by the caller and threaded in to avoid a per-row church lookup.
+  private async computeConflicts(churchId: string, row: any, timeZone?: string) {
+    const { windowStart, windowEnd } = ConflictHelper.computeWindow(row.eventStart);
     const roomIds = row.roomId ? [row.roomId] : [];
     const resources = row.resourceId ? [{ resourceId: row.resourceId, quantity: row.quantity || 1 }] : [];
+
     return ConflictHelper.findConflicts(
       {
         eventId: row.eventId,
@@ -159,7 +160,8 @@ export class EventBookingController extends ContentBaseController {
         resourceBookings: await this.repos.eventBooking.loadActiveForResources(churchId, resources.map((r) => r.resourceId), row.eventId),
         rooms: row.roomId ? await this.repos.room.loadByIds(churchId, roomIds) : [],
         resources: row.resourceId ? await this.repos.resource.loadByIds(churchId, [row.resourceId]) : [],
-        blockouts: await this.repos.calendarBlockout.loadOverlapping(churchId, windowStart, windowEnd)
+        blockouts: await this.repos.calendarBlockout.loadOverlapping(churchId, windowStart, windowEnd),
+        timeZone
       }
     );
   }

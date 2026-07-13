@@ -53,6 +53,7 @@ export interface ConflictContext {
   rooms: Room[];
   resources: Resource[];
   blockouts: CalendarBlockout[];
+  timeZone?: string;
 }
 
 export interface Conflict {
@@ -67,6 +68,27 @@ export interface Conflict {
 }
 
 export class ConflictHelper {
+  // Conflict-lookup window anchored to the booking's own start: capped to no earlier than
+  // a month ago (so old recurring series don't blow up the RRule expansion) and always
+  // extended to at least a year out (so far-future bookings still get checked).
+  public static computeWindow(anchor?: Date | string): { windowStart: Date; windowEnd: Date } {
+    const now = new Date();
+    let windowStart = anchor ? new Date(anchor) : now;
+    if (isNaN(windowStart.getTime())) windowStart = now;
+
+    const oneMonthAgo = new Date();
+    oneMonthAgo.setMonth(oneMonthAgo.getMonth() - 1);
+    if (windowStart < oneMonthAgo) windowStart = oneMonthAgo;
+
+    const windowEnd = new Date(windowStart);
+    windowEnd.setFullYear(windowEnd.getFullYear() + 1);
+
+    const futureLimit = new Date(now);
+    futureLimit.setFullYear(futureLimit.getFullYear() + 1);
+    if (windowEnd < futureLimit) return { windowStart, windowEnd: futureLimit };
+    return { windowStart, windowEnd };
+  }
+
   public static findConflicts(proposed: ProposedBooking, ctx: ConflictContext): Conflict[] {
     const occurrences = this.windowsFor(proposed, ctx);
     if (occurrences.length === 0) return [];
@@ -75,6 +97,10 @@ export class ConflictHelper {
     result.push(...this.findResourceConflicts(proposed, occurrences, ctx));
     result.push(...this.findBlockoutConflicts(proposed, occurrences, ctx));
     return result;
+  }
+
+  private static formatDate(d: Date, ctx: ConflictContext): string {
+    return d.toLocaleString("en-US", { timeZone: ctx.timeZone || "America/New_York" });
   }
 
   private static findRoomConflicts(proposed: ProposedBooking, occurrences: Occurrence[], ctx: ConflictContext): Conflict[] {
@@ -87,6 +113,7 @@ export class ConflictHelper {
         if (proposed.eventId && booking.eventId === proposed.eventId) continue;
         if (seenEvents.has(booking.eventId)) continue;
         const overlap = this.firstOverlap(booking, occurrences, ctx);
+
         if (overlap) {
           seenEvents.add(booking.eventId);
           result.push({
@@ -94,8 +121,8 @@ export class ConflictHelper {
             roomId,
             conflictingEventId: booking.eventId,
             conflictingEventTitle: booking.eventTitle,
-            date: overlap,
-            message: `${roomName} is already booked by "${booking.eventTitle}" on ${overlap.toLocaleString()}`
+            date: overlap.start,
+            message: `${roomName} is already booked by "${booking.eventTitle}" from ${this.formatDate(overlap.start, ctx)} to ${this.formatDate(overlap.end, ctx)}`
           });
         }
       }
@@ -122,7 +149,7 @@ export class ConflictHelper {
             type: "resource",
             resourceId: req.resourceId,
             date: occ.start,
-            message: `Only ${Math.max(total - booked, 0)} of ${total} "${resource?.name || "resource"}" available on ${occ.start.toLocaleString()} (${requested} requested)`
+            message: `Only ${Math.max(total - booked, 0)} of ${total} "${resource?.name || "resource"}" available from ${this.formatDate(occ.start, ctx)} to ${this.formatDate(occ.end, ctx)} (${requested} requested)`
           });
           break;
         }
@@ -149,18 +176,18 @@ export class ConflictHelper {
           resourceId: blockout.resourceId,
           blockoutId: blockout.id,
           date: hit.start,
-          message: `${target || "Facility"} blocked out${blockout.reason ? " (" + blockout.reason + ")" : ""} on ${hit.start.toLocaleString()}`
+          message: `${target || "Facility"} blocked out${blockout.reason ? " (" + blockout.reason + ")" : ""} from ${this.formatDate(blockStart, ctx)} to ${this.formatDate(blockEnd, ctx)}`
         });
       }
     }
     return result;
   }
 
-  private static firstOverlap(booking: BookingWithEvent, occurrences: Occurrence[], ctx: ConflictContext): Date | null {
+  private static firstOverlap(booking: BookingWithEvent, occurrences: Occurrence[], ctx: ConflictContext): Occurrence | null {
     const otherOccurrences = this.windowsFor(booking, ctx);
     for (const occ of occurrences) {
       for (const other of otherOccurrences) {
-        if (RecurrenceHelper.overlaps(occ.start, occ.end, other.start, other.end)) return occ.start;
+        if (RecurrenceHelper.overlaps(occ.start, occ.end, other.start, other.end)) return other;
       }
     }
     return null;

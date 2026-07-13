@@ -1,4 +1,4 @@
-import { EnvironmentBase } from "@churchapps/apihelper";
+import { EnvironmentBase, AwsHelper } from "@churchapps/apihelper";
 import { DatabaseUrlParser } from "./DatabaseUrlParser.js";
 
 export class Environment extends EnvironmentBase {
@@ -15,6 +15,9 @@ export class Environment extends EnvironmentBase {
   static messagingApi: string;
   static doingApi: string;
   static storeApi: string;
+  static ministryStuffApi: string;
+  static ministryStuffServiceKey: string;
+  static ministryStuffContentRoot: string;
 
   // Database connections per module
   static dbConnections: Map<string, any> = new Map();
@@ -89,7 +92,7 @@ export class Environment extends EnvironmentBase {
 
   static async init(environment: string) {
     environment = environment.toLowerCase();
-    const data = await this.initBase(environment, { appName: "API", fileMap: { railway: "railway.json" } });
+    const data = await this.initBase(environment, { appName: "API", fileMap: { railway: "railway.json", docker: "docker.json" } });
 
     // Set current environment and server config
     this.currentEnvironment = environment;
@@ -106,6 +109,13 @@ export class Environment extends EnvironmentBase {
     this.corsOrigin = process.env.CORS_ORIGIN || "*";
     // JWT secret strictly from environment variables
     this.jwtSecret = process.env.JWT_SECRET || "";
+
+    // gocurriculum OAuth client secret: env var first (parity with other integration secrets),
+    // else the SSM param the deploy created. Consumed by setProviderSecret in ProviderProxyController,
+    // whose controller module is imported after this runs.
+    if (!process.env.GOCURRICULUM_CLIENT_SECRET) {
+      process.env.GOCURRICULUM_CLIENT_SECRET = await AwsHelper.readParameter(`/${environment}/gocurriculumClientSecret`);
+    }
 
     // Initialize module-specific configs
     this.initializeModuleConfigs(data);
@@ -126,6 +136,9 @@ export class Environment extends EnvironmentBase {
     this.messagingApi = config.messagingApi || config.apiUrl + "/messaging";
     this.doingApi = config.doingApi || config.apiUrl + "/doing";
     this.storeApi = process.env.STORE_API_URL || config.storeApi || "";
+    this.ministryStuffApi = process.env.MINISTRYSTUFF_API_URL || config.ministryStuffApi || "";
+    this.ministryStuffServiceKey = process.env.MINISTRYSTUFF_SERVICE_KEY || "";
+    this.ministryStuffContentRoot = process.env.MINISTRYSTUFF_CONTENT_ROOT || config.ministryStuffContentRoot || "";
   }
 
   private static async initializeDatabaseConnections(_config: any) {

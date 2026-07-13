@@ -198,10 +198,11 @@ export class EventController extends ContentBaseController {
         roomIds: req.body.roomIds || [],
         resources: req.body.resources || []
       };
-      const windowStart = new Date();
-      const windowEnd = new Date();
-      windowEnd.setFullYear(windowEnd.getFullYear() + 1);
+      const { windowStart, windowEnd } = ConflictHelper.computeWindow(proposed.start);
       const resourceIds = proposed.resources.map((r) => r.resourceId);
+      const church = await getMembershipModuleGateway().loadChurch(au.churchId);
+      const timeZone = church?.timeZone;
+
       return ConflictHelper.findConflicts(proposed, {
         windowStart,
         windowEnd,
@@ -209,7 +210,8 @@ export class EventController extends ContentBaseController {
         resourceBookings: await this.repos.eventBooking.loadActiveForResources(au.churchId, resourceIds, proposed.eventId),
         rooms: await this.repos.room.loadByIds(au.churchId, proposed.roomIds),
         resources: await this.repos.resource.loadByIds(au.churchId, resourceIds),
-        blockouts: await this.repos.calendarBlockout.loadOverlapping(au.churchId, windowStart, windowEnd)
+        blockouts: await this.repos.calendarBlockout.loadOverlapping(au.churchId, windowStart, windowEnd),
+        timeZone
       });
     });
   }

@@ -208,20 +208,25 @@ export class TextingController extends MessagingBaseController {
   }
 
   @httpPost("/sendPerson")
-  public async sendToPerson(req: express.Request<{}, {}, { personId: string; phoneNumber: string; message: string }>, res: express.Response): Promise<any> {
+  public async sendToPerson(req: express.Request<{}, {}, { personId: string; phoneNumber: string; message: string; personName?: string }>, res: express.Response): Promise<any> {
     return this.actionWrapper(req, res, async (au) => {
       if (!au.checkAccess(Permissions.texting.send)) return this.json({}, 401);
-      const { personId, phoneNumber, message } = req.body;
+      const { personId, phoneNumber, message, personName } = req.body;
       if (!personId || !phoneNumber || !message) return this.json({ error: "personId, phoneNumber, and message are required" }, 400);
 
       const config = await this.getProviderConfig(au.churchId);
       if (!config) return this.json({ error: "No texting provider configured" }, 400);
 
       const provider = getProvider(config.providerName);
+      if (provider.capabilities.addSubscriber) {
+        const parts = (personName || "").split(" ");
+        await provider.addSubscriber(config, phoneNumber, { firstName: parts[0] || "", lastName: parts.slice(1).join(" ") || "" });
+      }
       const result = await provider.sendMessage(config, phoneNumber, message);
       if (!result.success && result.error?.includes("insufficient_credits")) {
         return this.json({ error: "insufficient_credits" }, 400);
       }
+      if (!result.success) console.error("❌ Text send failed:", config.providerName, result.error);
 
       const sentText: SentText = {
         churchId: au.churchId,
@@ -232,9 +237,22 @@ export class TextingController extends MessagingBaseController {
         successCount: result.success ? 1 : 0,
         failCount: result.success ? 0 : 1
       };
-      await this.repos.sentText.save(sentText);
+      const savedSentText = await this.repos.sentText.save(sentText);
 
-      return { recipientCount: 1, successCount: result.success ? 1 : 0, failCount: result.success ? 0 : 1 };
+      const log: DeliveryLog = {
+        churchId: au.churchId,
+        personId,
+        contentType: "sentText",
+        contentId: savedSentText.id,
+        deliveryMethod: "sms",
+        deliveryAddress: phoneNumber,
+        success: result.success,
+        errorMessage: result.error
+      };
+      await this.repos.deliveryLog.save(log);
+
+      if (!result.success) return { recipientCount: 1, successCount: 0, failCount: 1, error: result.error };
+      return { recipientCount: 1, successCount: 1, failCount: 0 };
     });
   }
 

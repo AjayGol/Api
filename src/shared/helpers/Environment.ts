@@ -1,5 +1,6 @@
 import { EnvironmentBase, AwsHelper } from "@churchapps/apihelper";
 import { DatabaseUrlParser } from "./DatabaseUrlParser.js";
+import { CorsHelper } from "./CorsHelper.js";
 
 export class Environment extends EnvironmentBase {
   // Current environment and server configuration
@@ -106,9 +107,10 @@ export class Environment extends EnvironmentBase {
     this.socketPort = process.env.SOCKET_PORT ? parseInt(process.env.SOCKET_PORT) : 8087;
     this.encryptionKey = process.env.ENCRYPTION_KEY || "";
     this.appName = data.appName || "API";
-    this.corsOrigin = process.env.CORS_ORIGIN || "*";
+    this.corsOrigin = CorsHelper.resolveOrigin(environment, process.env.CORS_ORIGIN);
     // JWT secret strictly from environment variables
     this.jwtSecret = process.env.JWT_SECRET || "";
+    this.assertRuntimeSecrets();
 
     // gocurriculum OAuth client secret: env var first (parity with other integration secrets),
     // else the SSM param the deploy created. Consumed by setProviderSecret in ProviderProxyController,
@@ -123,7 +125,6 @@ export class Environment extends EnvironmentBase {
       process.env.ONEDRIVE_CLIENT_SECRET = await AwsHelper.readParameter(`/${environment}/onedriveClientSecret`);
     }
 
-    // Initialize module-specific configs
     this.initializeModuleConfigs(data);
 
     // Initialize database connections
@@ -131,6 +132,18 @@ export class Environment extends EnvironmentBase {
 
     // Initialize app configurations
     await this.initializeAppConfigs(data);
+  }
+
+  private static isDevLikeEnvironment() {
+    return this.currentEnvironment === "dev" || this.currentEnvironment === "docker" || this.currentEnvironment === "local";
+  }
+
+  private static assertRuntimeSecrets() {
+    if (this.isDevLikeEnvironment()) return;
+    const jwt = this.jwtSecret || "";
+    const enc = this.encryptionKey || "";
+    if (!jwt || jwt.length < 32 || jwt === "jwt-secret-dev") throw new Error("JWT_SECRET is empty, shorter than 32 characters, or set to the development sample");
+    if (!enc || enc === "aSecretKeyOfExactly192BitsLength") throw new Error("ENCRYPTION_KEY is empty or set to the development sample");
   }
 
   private static initializeModuleConfigs(config: any) {

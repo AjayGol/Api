@@ -126,9 +126,13 @@ export class ConversationController extends MessagingBaseController {
       res: express.Response
   ): Promise<Conversation[]> {
     return this.actionWrapperAnon(req, res, async (): Promise<Conversation[]> => {
-      if (this.isPersonNote(contentType) && !this.canViewPersonNotes(this.authUser(), contentType)) return this.json([], 401) as any;
+      if (this.isPersonNote(contentType)) {
+        if (!this.canViewPersonNotes(this.authUser(), contentType)) return this.json([], 401) as any;
+      }
       const data = await this.repos.conversation.loadForContent(churchId, contentType, contentId);
-      return this.repos.conversation.convertAllToModel(data as any[]);
+      const result = this.repos.conversation.convertAllToModel(data as any[]);
+      if (!this.isPersonNote(contentType) && !this.isSameChurch(this.authUser(), churchId) && result.some((conv) => !this.isAnonPublicConversation(conv))) return this.json([], 401) as any;
+      return result;
     }) as any;
   }
 
@@ -136,8 +140,11 @@ export class ConversationController extends MessagingBaseController {
   public async loadById(@requestParam("churchId") churchId: string, @requestParam("id") id: string, req: express.Request<{}, {}, null>, res: express.Response): Promise<Conversation> {
     return this.actionWrapperAnon(req, res, async () => {
       const data = await this.repos.conversation.loadById(churchId, id);
+      if (!data) return this.json({}, 401);
       const result = this.repos.conversation.convertToModel(data);
-      if (this.isPersonNote(result?.contentType) && !this.canViewPersonNotes(this.authUser(), result.contentType)) return this.json({}, 401);
+      if (this.isPersonNote(result?.contentType)) {
+        if (!this.canViewPersonNotes(this.authUser(), result.contentType)) return this.json({}, 401);
+      } else if (!this.isAnonPublicConversation(result) && !this.isSameChurch(this.authUser(), result.churchId)) return this.json({}, 401);
       return result;
     }) as any;
   }
@@ -227,6 +234,19 @@ export class ConversationController extends MessagingBaseController {
     }) as any;
   }
 
+  // authz-exempt: self-service — any member may ensure their own church's public livestream room, and
+  // the room is created under au.churchId. actionWrapper does NOT reject anonymous callers (it passes
+  // the action an empty AuthenticatedUser), so isAuthenticated is what makes "from the JWT" true here;
+  // without it an anonymous POST created rooms under churchId "".
+  @httpPost("/ensure")
+  public async ensure(req: express.Request<{}, {}, { contentType?: string; contentId?: string }>, res: express.Response): Promise<any> {
+    return this.actionWrapper(req, res, async (au) => {
+      if (!this.isAuthenticated(au)) return this.json({}, 401);
+      if (req.body?.contentType !== "streamingLive" || !req.body?.contentId) return this.json({}, 401);
+      return await this.getOrCreate(au.churchId, "streamingLive", req.body.contentId, "public", true, false);
+    }) as any;
+  }
+
   @httpGet("/current/:churchId/:contentType/:contentId")
   public async current(
     @requestParam("churchId") churchId: string,
@@ -235,9 +255,31 @@ export class ConversationController extends MessagingBaseController {
       req: express.Request<{}, {}, {}>,
       res: express.Response
   ): Promise<any> {
+    if (contentType !== "streamingLive") {
+      return this.actionWrapper(req, res, async (au) => {
+        if (!this.isSameChurch(au, churchId)) return this.json({}, 401);
+        if (this.isPersonNote(contentType) && !this.canViewPersonNotes(au, contentType)) return this.json({}, 401);
+        const conversation = await this.getOrCreate(churchId, contentType, contentId, "public", false, true);
+        if (contentType === "streamingLiveHost" && conversation?.contentId) await this.getOrCreate(churchId, "streamingLive", conversation.contentId, "public", true, false);
+        return conversation;
+      }) as any;
+    }
     return this.actionWrapperAnon(req, res, async () => {
-      if (this.isPersonNote(contentType) && !this.canViewPersonNotes(this.authUser(), contentType)) return this.json({}, 401);
-      return await this.getOrCreate(churchId, contentType, contentId, "public", true);
+      const au = this.authUser();
+      if (this.isSameChurch(au, churchId)) return await this.getOrCreate(churchId, contentType, contentId, "public", true, false);
+      const existing = await this.repos.conversation.loadCurrent(churchId, contentType, contentId);
+      if (existing) {
+        const conv = this.repos.conversation.convertToModel(existing);
+        if (!this.isAnonPublicConversation(conv)) return this.json({}, 401);
+        return conv;
+      }
+      // Anonymous viewers may lazily create the public livestream room, but only for a real church
+      // (the /ensure hole this guards against was rooms created under garbage churchIds).
+      // Lazy import: the gateway chain pulls in DB/env modules the unit-test harness doesn't stub.
+      const { getMembershipModuleGateway } = await import("../../../shared/modules/MembershipModuleGateway.js");
+      const church = await getMembershipModuleGateway().loadChurch(churchId);
+      if (!church) return this.json({}, 404);
+      return await this.getOrCreate(churchId, contentType, contentId, "public", true, false);
     }) as any;
   }
 
@@ -250,8 +292,8 @@ export class ConversationController extends MessagingBaseController {
     }) as any;
   }
 
-  private async getOrCreate(churchId: string, contentType: string, contentId: string, visibility: string, allowAnonymousPosts: boolean) {
-    const CONTENT_ID = contentId.length > 11 ? EncryptionHelper.decrypt(contentId.toString()) : contentId;
+  private async getOrCreate(churchId: string, contentType: string, contentId: string, visibility: string, allowAnonymousPosts: boolean, decryptContentId: boolean) {
+    const CONTENT_ID = decryptContentId && contentId.length > 11 ? EncryptionHelper.decrypt(contentId.toString()) : contentId;
     let result: Conversation = await this.repos.conversation.loadCurrent(churchId, contentType, CONTENT_ID);
     if (result === null) {
       result = {

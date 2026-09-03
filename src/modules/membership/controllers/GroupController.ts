@@ -54,7 +54,7 @@ export class GroupController extends MembershipBaseController {
   @httpGet("/public/:churchId/list")
   public async getPublicList(@requestParam("churchId") churchId: string, req: express.Request<{}, {}, null>, res: express.Response): Promise<any> {
     return this.actionWrapperAnon(req, res, async () => {
-      const groups = this.repos.group.convertAllToModel(churchId, (await this.repos.group.loadAll(churchId)) as any[]);
+      const groups = this.repos.group.convertAllToModel(churchId, (await this.repos.group.loadByTag(churchId, "standard")) as any[]);
       return groups.filter((g) => !g.confidential);
     });
   }
@@ -181,7 +181,7 @@ export class GroupController extends MembershipBaseController {
         .where("churchId", "=", au.churchId)
         .where((eb: any) => eb.or(associations.map((a) => {
           const base = eb("planTypeId", "=", a.contentId);
-          if (a.settings === "past") return eb.and([base, eb("serviceDate", "<", sql`CURDATE()`)]);
+          if (a.settings === "past") return eb.and([base, eb("serviceDate", "<=", sql`CURDATE()`)]);
           if (a.settings === "future") return eb.and([base, eb("serviceDate", ">=", sql`CURDATE()`)]);
           return base;
         })))

@@ -25,9 +25,12 @@ export class Environment extends EnvironmentBase {
 
   // Membership API specific
   static jwtExpiration: string;
+  static oauthAccessTokenSeconds: number;
   static emailOnRegistration: boolean;
   static supportEmail: string;
   static b1AdminRoot: string;
+  static b1AppRoot: string;
+  static worshipCommonsRoot: string;
   static hubspotKey: string;
   static mauticUrl: string;
   static mauticUser: string;
@@ -95,8 +98,6 @@ export class Environment extends EnvironmentBase {
     environment = environment.toLowerCase();
     const data = await this.initBase(environment, { appName: "API", fileMap: { railway: "railway.json", docker: "docker.json" } });
 
-    // Set current environment and server config
-    this.currentEnvironment = environment;
     this.port = process.env.PORT ? parseInt(process.env.PORT) : (process.env.SERVER_PORT ? parseInt(process.env.SERVER_PORT) : 8084);
     this.socketUrl = process.env.SOCKET_URL;
 
@@ -108,9 +109,9 @@ export class Environment extends EnvironmentBase {
     this.encryptionKey = process.env.ENCRYPTION_KEY || "";
     this.appName = data.appName || "API";
     this.corsOrigin = CorsHelper.resolveOrigin(environment, process.env.CORS_ORIGIN);
-    // JWT secret strictly from environment variables
     this.jwtSecret = process.env.JWT_SECRET || "";
-    this.assertRuntimeSecrets();
+    this.assertRuntimeSecrets(environment);
+    this.currentEnvironment = environment;
 
     // gocurriculum OAuth client secret: env var first (parity with other integration secrets),
     // else the SSM param the deploy created. Consumed by setProviderSecret in ProviderProxyController,
@@ -126,11 +127,7 @@ export class Environment extends EnvironmentBase {
     }
 
     this.initializeModuleConfigs(data);
-
-    // Initialize database connections
     await this.initializeDatabaseConnections(data);
-
-    // Initialize app configurations
     await this.initializeAppConfigs(data);
   }
 
@@ -138,12 +135,14 @@ export class Environment extends EnvironmentBase {
     return this.currentEnvironment === "dev" || this.currentEnvironment === "docker" || this.currentEnvironment === "local";
   }
 
-  private static assertRuntimeSecrets() {
-    if (this.isDevLikeEnvironment()) return;
+  private static assertRuntimeSecrets(environment: string) {
+    if (environment === "dev" || environment === "docker" || environment === "local") return;
     const jwt = this.jwtSecret || "";
     const enc = this.encryptionKey || "";
     if (!jwt || jwt.length < 32 || jwt === "jwt-secret-dev") throw new Error("JWT_SECRET is empty, shorter than 32 characters, or set to the development sample");
-    if (!enc || enc === "aSecretKeyOfExactly192BitsLength") throw new Error("ENCRYPTION_KEY is empty or set to the development sample");
+    if (!enc) throw new Error("ENCRYPTION_KEY is empty");
+    // staging still has the committed sample; refusing it leaves the Lambda half-booted
+    if (environment === "prod" && enc === "aSecretKeyOfExactly192BitsLength") throw new Error("ENCRYPTION_KEY is set to the development sample");
   }
 
   private static initializeModuleConfigs(config: any) {
@@ -161,7 +160,9 @@ export class Environment extends EnvironmentBase {
   }
 
   private static async initializeDatabaseConnections(_config: any) {
-    const modules = ["membership", "attendance", "content", "giving", "messaging", "doing", "reporting"];
+    const modules = [
+      "membership", "attendance", "content", "giving", "messaging", "doing", "reporting", "commons"
+    ];
 
     // Special case: DoingApi needs access to membership database
     if (process.env.DOING_MEMBERSHIP_CONNECTION_STRING) {
@@ -222,9 +223,13 @@ export class Environment extends EnvironmentBase {
 
     // Membership API specific
     this.jwtExpiration = "2 days";
+    const oauthTtl = parseInt(process.env.OAUTH_ACCESS_TOKEN_SECONDS || "", 10);
+    this.oauthAccessTokenSeconds = Number.isFinite(oauthTtl) && oauthTtl > 0 ? oauthTtl : 7 * 24 * 3600;
     this.emailOnRegistration = process.env.EMAIL_ON_REGISTRATION === "true" || config.emailOnRegistration === true;
     this.supportEmail = process.env.SUPPORT_EMAIL || config.supportEmail || "support@churchapps.org";
     this.b1AdminRoot = process.env.B1ADMIN_ROOT || config.b1AdminRoot || "https://admin.staging.b1.church";
+    this.b1AppRoot = process.env.B1APP_ROOT || config.b1AppRoot || "https://{subdomain}.b1.church";
+    this.worshipCommonsRoot = process.env.WORSHIPCOMMONS_ROOT || config.worshipCommonsRoot || "";
     this.mailSystem = process.env.MAIL_SYSTEM ?? config.mailSystem ?? "";
     EnvironmentBase.mailSystem = this.mailSystem;
 
@@ -277,7 +282,9 @@ export class Environment extends EnvironmentBase {
   }
 
   static getConnectionStatus(): { loaded: string[]; missing: string[]; total: number } {
-    const expectedModules = ["membership", "attendance", "content", "giving", "messaging", "doing", "reporting"];
+    const expectedModules = [
+      "membership", "attendance", "content", "giving", "messaging", "doing", "reporting", "commons"
+    ];
     const loadedModules = Array.from(this.dbConnections.keys()).filter((key) => !key.includes("-"));
     const missing = expectedModules.filter((m) => !loadedModules.includes(m));
 

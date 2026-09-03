@@ -93,18 +93,21 @@ export class YouVersionHelper {
       !this.excludedAbbreviations.includes(t.abbreviation));
   }
 
+  static cacheKey(apiId: string) {
+    return apiId.startsWith("YOUVERSION-") ? apiId : "YOUVERSION-" + apiId;
+  }
+
   static async getBooks(translationKey: string) {
     const result: BibleBook[] = [];
     const url = this.baseUrl + "/bibles/" + translationKey + "/books";
     const data = await this.getContent(url);
 
-    // YouVersion returns: { data: [{ id: "GEN", title: "Genesis", full_title: "Genesis", abbreviation: "Gen", canon: "old_testament", chapters: [...] }, ...] }
     const books = data.data || data;
     if (Array.isArray(books)) {
       books.forEach((d: any, i: number) => {
         result.push({
-          translationKey,
-          keyName: d.id,  // USFM code like "GEN", "EXO", "REV"
+          translationKey: this.cacheKey(translationKey),
+          keyName: d.id,
           abbreviation: d.abbreviation || d.id,
           name: d.title || d.full_title || d.id,
           sort: i
@@ -126,7 +129,7 @@ export class YouVersionHelper {
         const chapterNum = typeof d.id === "number" ? d.id : parseInt(d.id, 10);
         if (!isNaN(chapterNum)) {
           result.push({
-            translationKey,
+            translationKey: this.cacheKey(translationKey),
             bookKey,
             keyName: bookKey + "." + chapterNum,
             number: chapterNum
@@ -152,7 +155,7 @@ export class YouVersionHelper {
         const verseNum = typeof d.id === "number" ? d.id : parseInt(d.id, 10);
         if (!isNaN(verseNum)) {
           result.push({
-            translationKey,
+            translationKey: this.cacheKey(translationKey),
             chapterKey,
             keyName: bookKey + "." + chapterNumber + "." + verseNum,
             number: verseNum
@@ -177,19 +180,14 @@ export class YouVersionHelper {
     const chapterKey = `${bookKey}.${chapterNumber}`;
     const url = this.baseUrl + "/bibles/" + translationKey + "/passages/" + chapterKey + "?format=html";
 
-    try {
-      const data = await this.getContent(url);
-      if (data.content) {
-        const verses = this.parseChapterHtml(data.content, bookKey, chapterNumber, translationKey);
-        // Filter to only return requested verse range
-        for (const verse of verses) {
-          if (verse.verseNumber >= startVerse && verse.verseNumber <= endVerse) {
-            result.push(verse);
-          }
+    const data = await this.getContent(url);
+    if (data.content) {
+      const verses = this.parseChapterHtml(data.content, bookKey, chapterNumber, translationKey);
+      for (const verse of verses) {
+        if (verse.verseNumber >= startVerse && verse.verseNumber <= endVerse) {
+          result.push(verse);
         }
       }
-    } catch (e: any) {
-      console.log(`Failed to fetch chapter ${chapterKey}:`, e.message);
     }
 
     return result;
@@ -214,11 +212,8 @@ export class YouVersionHelper {
       // Get content after the verse marker
       let content = part.substring(verseMatch[0].length);
 
-      // Remove verse label spans like <span class="yv-vlbl">1</span>
       content = content.replace(/<span class="yv-vlbl">\d+<\/span>/g, "");
-
-      // Remove all HTML tags
-      content = content.replace(/<[^>]*>/g, "");
+      content = content.replace(/<[^>]*>/g, " ");
 
       // Decode HTML entities
       content = content
@@ -245,7 +240,7 @@ export class YouVersionHelper {
     const verses = this.parseVersesFromHtml(html);
 
     return verses.map(v => ({
-      translationKey: "YOUVERSION-" + translationKey,
+      translationKey: this.cacheKey(translationKey),
       verseKey: `${bookKey}.${chapterNumber}.${v.verseNumber}`,
       bookKey,
       chapterNumber,
@@ -278,12 +273,25 @@ export class YouVersionHelper {
     //return data;
   }
 
+  // Rate-limit circuit breaker: after an upstream 429, skip calls until the retry-after window clears so cache misses can't keep the limit pinned.
+  static blockedUntil = 0;
+
   static async getContent(url: string) {
+    if (Date.now() < this.blockedUntil) {
+      const err: any = new Error("YouVersion rate limit cooldown");
+      err.status = 429;
+      err.response = { status: 429 };
+      throw err;
+    }
     try {
       const resp = await axios.get(url, { headers: { "X-YVP-App-Key": Environment.youVersionApiKey } });
       return resp.data;
     } catch (error: any) {
       if (error.response) {
+        if (error.response.status === 429) {
+          const retryAfter = parseInt(error.response.headers?.["retry-after"], 10) || 300;
+          this.blockedUntil = Date.now() + retryAfter * 1000;
+        }
         console.log("YouVersion API error response:", JSON.stringify(error.response.data));
       }
       throw error;

@@ -260,10 +260,8 @@ export class UserController extends MembershipBaseController {
         user.password = bcrypt.hashSync(tempPassword, 10);
         user = await this.repos.user.save(user);
 
-        const code = generateVerificationCode();
-        const codeHash = bcrypt.hashSync(code, 10);
-        await this.repos.user.updateVerification(user.id, codeHash, new Date(Date.now() + VERIFICATION_CODE_TTL_MS));
-        await UserHelper.sendWelcomeEmail(user.email, code, null, null);
+        // No mail here: nobody on this path asked for an account. Admins send the invite explicitly
+        // via /users/sendInviteEmail, and self-service signup goes through /users/register.
         await UserChurchHelper.createForNewUser(user.id, user.email);
       }
 
@@ -371,7 +369,7 @@ export class UserController extends MembershipBaseController {
           await this.repos.user.save(user);
           const ip = AuditLogHelper.getClientIp(req);
           AuditLogHelper.log(this.repos, "", user.id, "security", "password_changed", "user", user.id, { email: user.email, method: "authGuid" }, ip);
-          return { success: true };
+          return { success: true, email: user.email };
         } else return { success: false };
       } catch (e) {
         if (Environment.currentEnvironment === "dev") {
@@ -637,7 +635,7 @@ export class UserController extends MembershipBaseController {
       const user = await this.repos.user.loadByEmail(email);
       if (user) {
         isExistingUser = true;
-        const minted = AuthGuidHelper.mint();
+        const minted = AuthGuidHelper.mint(true);
         user.authGuid = minted.stored;
         loginLink = `/login?auth=${minted.raw}`;
         await Promise.all([

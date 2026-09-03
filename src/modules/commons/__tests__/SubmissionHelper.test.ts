@@ -1,0 +1,255 @@
+import "reflect-metadata";
+jest.mock("@churchapps/helpers", () => require("../__mocks__/churchappsHelpers"), { virtual: true });
+jest.mock("../helpers/ContentLibraryHelper", () => ({
+  ContentLibraryHelper: {
+    pendingKey: (id: string, name: string) => `commons/pending/${id}/${name}`,
+    storePending: jest.fn(async () => {}),
+    exists: jest.fn(async () => true),
+    removeKey: jest.fn(async () => {}),
+    contentTypeFor: () => "application/octet-stream",
+    sha256: () => "hash",
+    readPending: jest.fn(async () => null)
+  }
+}));
+jest.mock("../helpers/QualityHelper", () => ({ QualityHelper: { score: jest.fn(async () => ({ qualityScore: 21, qualityDetail: JSON.stringify({ heuristic: 21, parts: ["demo"], llm: 0, notes: "completeness heuristic only — not an AI judgment" }) })) } }));
+jest.mock("../helpers/CommonsMailHelper", () => ({ CommonsMailHelper: { notifyReceived: jest.fn(async () => {}) } }));
+
+import { SubmissionHelper } from "../helpers/SubmissionHelper";
+import { ContentLibraryHelper } from "../helpers/ContentLibraryHelper";
+import { QualityHelper } from "../helpers/QualityHelper";
+import { CommonsMailHelper } from "../helpers/CommonsMailHelper";
+
+const au = { id: "user0000001", churchId: "church00001" };
+const payload = { name: "New Hymn", license: "WC", tags: "Grace", detail: { writer: "Anon", chordPro: "Verse 1\n[G]Sing", certified: true } };
+
+function repos(overrides: any = {}) {
+  const r: any = {
+    asset: {
+      create: jest.fn(async (a: any) => { a.id = "asset000001"; return a; }),
+      loadById: jest.fn(async (id: string) => ({ id, assetType: "song", status: "published", publisherUserId: "owner000001" }))
+    },
+    submission: {
+      create: jest.fn(async (s: any) => { s.id = "sub00000001"; s.status = "draft"; return s; }),
+      countByUser: jest.fn(async () => 0),
+      countSubmittedSince: jest.fn(async () => 0),
+      submit: jest.fn(async () => true),
+      update: jest.fn(async () => {}),
+      loadPendingForAsset: jest.fn(async () => undefined)
+    },
+    assetFile: {
+      loadOne: jest.fn(async () => undefined),
+      upsert: jest.fn(async (f: any) => ({ ...f, id: "file0000001" })),
+      loadBySubmission: jest.fn(async () => []),
+      loadLive: jest.fn(async () => []),
+      loadLiveByHash: jest.fn(async () => undefined)
+    }
+  };
+  for (const [k, v] of Object.entries(overrides)) Object.assign(r[k], v);
+  return r;
+}
+
+describe("SubmissionHelper.createDraft", () => {
+  beforeEach(() => jest.clearAllMocks());
+
+  it("creates a pending asset seeded from the payload plus a draft submission for a new asset", async () => {
+    const r = repos();
+    const result: any = await SubmissionHelper.createDraft(r, au, { assetType: "song", payload });
+    expect(result.ok).toBe(true);
+    expect(r.asset.create).toHaveBeenCalledWith(expect.objectContaining({ assetType: "song", name: "New Hymn", status: "pending", publisherUserId: "user0000001", license: "WC" }));
+    expect(r.submission.create).toHaveBeenCalledWith(expect.objectContaining({ assetId: "asset000001", submittedBy: "user0000001", payload }));
+    expect(result.value.submission.status).toBe("draft");
+  });
+
+  it("targets an existing asset for a modification without touching the asset row", async () => {
+    const r = repos();
+    const result: any = await SubmissionHelper.createDraft(r, au, { assetId: "asset000009", payload, note: "fixed a chord" });
+    expect(result.ok).toBe(true);
+    expect(r.asset.create).not.toHaveBeenCalled();
+    expect(r.submission.create).toHaveBeenCalledWith(expect.objectContaining({ assetId: "asset000009", submittedBy: "user0000001", note: "fixed a chord" }));
+  });
+
+  it("refuses unknown types and removed assets", async () => {
+    expect((await SubmissionHelper.createDraft(repos(), au, { assetType: "nope", payload }) as any).status).toBe(400);
+    const r = repos({ asset: { loadById: jest.fn(async () => ({ id: "x", status: "removed" })) } });
+    expect((await SubmissionHelper.createDraft(r, au, { assetId: "x", payload }) as any).status).toBe(404);
+  });
+});
+
+describe("SubmissionHelper files", () => {
+  beforeEach(() => jest.clearAllMocks());
+  const sub: any = { id: "sub00000001", status: "draft", submittedBy: "user0000001" };
+  const asset: any = { id: "asset000001", assetType: "song" };
+
+  it("infers add vs replace from the live file set and stores pending bytes privately", async () => {
+    const r = repos();
+    const added: any = await SubmissionHelper.storeInline(r, sub, asset, "tune.abc", "text/plain", Buffer.from("X:1"), "user0000001");
+    expect(added.ok).toBe(true);
+    expect(ContentLibraryHelper.storePending).toHaveBeenCalledWith("commons/pending/sub00000001/tune.abc", "text/plain", expect.any(Buffer));
+    expect(r.assetFile.upsert).toHaveBeenCalledWith(expect.objectContaining({ submissionId: "sub00000001", name: "tune.abc", action: "add", uploadedBy: "user0000001" }));
+
+    r.assetFile.loadOne.mockResolvedValueOnce({ id: "live0000001", name: "demoAudio.mp3" });
+    await SubmissionHelper.recordFile(r, sub, asset, { name: "demoAudio.mp3", sizeBytes: 10 });
+    expect(r.assetFile.upsert).toHaveBeenLastCalledWith(expect.objectContaining({ name: "demoAudio.mp3", action: "replace" }));
+  });
+
+  it("rejects names the registry does not know and removals of files that are not live", async () => {
+    const r = repos();
+    expect((await SubmissionHelper.recordFile(r, sub, asset, { name: "virus.exe", sizeBytes: 1 }) as any).status).toBe(400);
+    expect((await SubmissionHelper.recordFile(r, sub, asset, { name: "tune.abc", action: "remove" }) as any).status).toBe(400);
+  });
+});
+
+describe("SubmissionHelper.submit", () => {
+  beforeEach(() => jest.clearAllMocks());
+  const draft = (): any => ({ id: "sub00000001", assetId: "asset000001", status: "draft", submittedBy: "user0000001", payload });
+  const asset: any = { id: "asset000001", assetType: "song", publisherUserId: "user0000001" };
+
+  it("moves a valid draft to pending with a triage score", async () => {
+    const r = repos({ assetFile: { loadBySubmission: jest.fn(async () => [{ name: "demoAudio.mp3", sizeBytes: 100, action: "add" }]) } });
+    const sub = draft();
+    sub.payload = { ...payload, detail: { ...payload.detail, recordingOwned: true } };
+    const result: any = await SubmissionHelper.submit(r, sub, asset);
+    expect(result).toEqual({ ok: true, value: { status: "pending" } });
+    expect(QualityHelper.score).toHaveBeenCalledWith(expect.objectContaining({ title: "New Hymn", fileRoles: ["demoAudio"] }));
+    const qualityDetail = { heuristic: 21, parts: ["demo"], llm: 0, notes: "completeness heuristic only — not an AI judgment" };
+    expect(r.submission.update).toHaveBeenCalledWith("sub00000001", expect.objectContaining({ payload: expect.objectContaining({ qualityDetail }) }));
+    expect(r.submission.submit).toHaveBeenCalledWith("sub00000001", "asset000001", 21);
+    expect(r.submission.update).toHaveBeenCalledWith("sub00000001", expect.objectContaining({ payload: expect.objectContaining({ licenseVersion: "1.0", attestationVersion: "1.0", attestedAt: expect.any(String) }) }));
+    expect(CommonsMailHelper.notifyReceived).toHaveBeenCalledWith(expect.objectContaining({ id: "sub00000001" }));
+  });
+
+  it("defaults PD licenseVersion to CC0 and keeps an existing attestation stamp", async () => {
+    const r = repos({ assetFile: { loadBySubmission: jest.fn(async () => [{ name: "demoAudio.mp3", sizeBytes: 100, action: "add" }]) } });
+    const sub = draft();
+    sub.payload = { name: "Old Hymn", license: "PD", attestationVersion: "1.0", attestedAt: "2026-01-01T00:00:00.000Z", detail: { writer: "Anon", chordPro: "[C]x", certified: true, recordingOwned: true } };
+    await SubmissionHelper.submit(r, sub, asset);
+    expect(r.submission.update).toHaveBeenCalledWith("sub00000001", expect.objectContaining({ payload: expect.objectContaining({ license: "PD", licenseVersion: "CC0", attestationVersion: "1.0", attestedAt: "2026-01-01T00:00:00.000Z", name: "Old Hymn" }) }));
+  });
+
+  it("does not email the writer when submit is refused", async () => {
+    await SubmissionHelper.submit(repos(), { ...draft(), status: "pending" }, asset);
+    expect(CommonsMailHelper.notifyReceived).not.toHaveBeenCalled();
+  });
+
+  it("returns 400 with every registry message when validation fails", async () => {
+    const sub = draft();
+    sub.payload = { name: " ", license: "CC0", detail: { writer: "" } };
+    const result: any = await SubmissionHelper.submit(repos(), sub, asset);
+    expect(result.status).toBe(400);
+    expect(result.errors.join("\n")).toMatch(/name/);
+    expect(result.errors.join("\n")).toMatch(/license/);
+    expect(result.errors.join("\n")).toMatch(/Writer/);
+    expect(result.error).toMatch(/name/);
+  });
+
+  it("normalizes tags onto the stored payload", async () => {
+    const r = repos();
+    const sub = draft();
+    sub.payload = { ...payload, tags: " hope ,  grace,Hope" };
+    await SubmissionHelper.submit(r, sub, asset);
+    expect(r.submission.update).toHaveBeenCalledWith("sub00000001", expect.objectContaining({ payload: expect.objectContaining({ tags: "Hope, Grace" }) }));
+  });
+
+  it("returns 400 when a recorded file was never uploaded", async () => {
+    (ContentLibraryHelper.exists as jest.Mock).mockResolvedValueOnce(false);
+    const r = repos({ assetFile: { loadBySubmission: jest.fn(async () => [{ name: "tune.abc", sizeBytes: 5, action: "add" }]) } });
+    const result: any = await SubmissionHelper.submit(r, draft(), asset);
+    expect(result).toMatchObject({ status: 400, error: "tune.abc was not uploaded" });
+  });
+
+  it("returns 409 when the primary file already exists on another asset", async () => {
+    const r = repos({
+      assetFile: {
+        loadBySubmission: jest.fn(async () => [{ name: "content.fstemplate", sizeBytes: 5, action: "add", contentHash: "abc" }]),
+        loadLiveByHash: jest.fn(async () => ({ assetId: "asset000777" }))
+      }
+    });
+    const result: any = await SubmissionHelper.submit(r, { ...draft(), payload: { name: "Wide", license: "CC0" } }, { id: "asset000001", assetType: "freeshow/template" });
+    expect(result.status).toBe(409);
+  });
+
+  it("returns 429 when the user has too many pending or daily submissions", async () => {
+    expect((await SubmissionHelper.submit(repos({ submission: { countByUser: jest.fn(async () => 5) } }), draft(), asset) as any).status).toBe(429);
+    expect((await SubmissionHelper.submit(repos({ submission: { countSubmittedSince: jest.fn(async () => 20) } }), draft(), asset) as any).status).toBe(429);
+  });
+
+  it("returns 409 naming the competing submission when another pending one targets the asset", async () => {
+    const r = repos({ submission: { submit: jest.fn(async () => false), loadPendingForAsset: jest.fn(async () => ({ id: "sub00000002" })) } });
+    const result: any = await SubmissionHelper.submit(r, draft(), asset);
+    expect(result.status).toBe(409);
+    expect(result.error).toContain("sub00000002");
+  });
+
+  it("refuses anything that is not a draft", async () => {
+    expect((await SubmissionHelper.submit(repos(), { ...draft(), status: "pending" }, asset) as any).status).toBe(400);
+  });
+});
+
+describe("SubmissionHelper key checks", () => {
+  beforeEach(() => jest.clearAllMocks());
+  const asset: any = { id: "asset000001", assetType: "song", publisherUserId: "user0000001" };
+  const baseNotes = "completeness heuristic only — not an AI judgment";
+
+  // C major scale as a one-track format-0 SMF
+  function midi(): Buffer {
+    const events: number[] = [];
+    for (const n of [
+      60, 62, 64, 65, 67, 69, 71, 72
+    ]) events.push(0x00, 0x90, n, 0x40, 0x60, 0x80, n, 0x00);
+    events.push(0x00, 0xff, 0x2f, 0x00);
+    const track = Buffer.from(events);
+    const head = Buffer.alloc(14);
+    head.write("MThd", 0, "latin1");
+    head.writeUInt32BE(6, 4);
+    head.writeUInt16BE(0, 8);
+    head.writeUInt16BE(1, 10);
+    head.writeUInt16BE(480, 12);
+    const chunk = Buffer.alloc(8);
+    chunk.write("MTrk", 0, "latin1");
+    chunk.writeUInt32BE(track.length, 4);
+    return Buffer.concat([head, chunk, track]);
+  }
+
+  const pending = (files: Record<string, Buffer>) =>
+    (ContentLibraryHelper.readPending as jest.Mock).mockImplementation(async (_id: string, name: string) =>
+      files[name] ? { buffer: files[name], contentType: "application/octet-stream" } : null);
+
+  function submitWith(names: string[], detail: any) {
+    const r = repos({ assetFile: { loadBySubmission: jest.fn(async () => names.map((name) => ({ name, sizeBytes: 100, action: "add" }))) } });
+    const sub: any = { id: "sub00000001", assetId: "asset000001", status: "draft", submittedBy: "user0000001", payload: { ...payload, detail: { writer: "Anon", certified: true, ...detail } } };
+    return SubmissionHelper.submit(r, sub, asset).then((result) => ({ result, notes: r.submission.update.mock.calls[0]?.[1].payload.qualityDetail.notes }));
+  }
+
+  it("notes a MIDI whose estimated key disagrees with songKey", async () => {
+    pending({ "tune.mid": midi() });
+    const { result, notes } = await submitWith(["tune.mid"], { chordPro: "Verse 1\n[D]Sing", songKey: "D" });
+    expect(result).toEqual({ ok: true, value: { status: "pending" } });
+    expect(notes).toBe(`${baseNotes}; MIDI sounds like C, song key is D`);
+  });
+
+  it("notes an ABC whose K: header disagrees with the ChordPro {key:}", async () => {
+    pending({ "tune.abc": Buffer.from("X:1\nT:Hymn\nK:G\nGABc|") });
+    const { notes } = await submitWith(["tune.abc"], { chordPro: "{key: A}\n\nVerse 1\n[A]Sing", songKey: "D" });
+    expect(notes).toBe(`${baseNotes}; ABC is in G, chart key is A`);
+  });
+
+  it("falls back to songKey when the ChordPro declares no key, and stays silent when the keys agree", async () => {
+    pending({ "tune.mid": midi(), "tune.abc": Buffer.from("X:1\nK:C\n") });
+    const { notes } = await submitWith(["tune.mid", "tune.abc"], { chordPro: "Verse 1\n[C]Sing", songKey: "C" });
+    expect(notes).toBe(baseNotes);
+  });
+
+  it("never blocks: an unreadable tune, a missing object or a missing key just produce no note", async () => {
+    pending({ "tune.mid": Buffer.from("junk") });
+    expect((await submitWith(["tune.mid"], { chordPro: "[D]x", songKey: "D" })).notes).toBe(baseNotes);
+    pending({});
+    expect((await submitWith(["tune.abc"], { chordPro: "[D]x", songKey: "D" })).notes).toBe(baseNotes);
+    pending({ "tune.mid": midi() });
+    expect((await submitWith(["tune.mid"], { chordPro: "[D]x" })).notes).toBe(baseNotes);
+  });
+
+  it("does not read pending objects when no tune was submitted", async () => {
+    await submitWith(["demoAudio.mp3"], { chordPro: "[D]x", songKey: "D", recordingOwned: true });
+    expect(ContentLibraryHelper.readPending).not.toHaveBeenCalled();
+  });
+});

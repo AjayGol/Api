@@ -2,7 +2,7 @@ import { controller, httpPost, httpGet, requestParam, httpDelete } from "inversi
 import express from "express";
 import { MembershipBaseController } from "./MembershipBaseController.js";
 import { FormSubmission, Answer, Form, Church } from "../models/index.js";
-import { Permissions, Environment, ConversationalFormHelper } from "../helpers/index.js";
+import { Permissions, Environment, ConversationalFormHelper, UserChurchHelper } from "../helpers/index.js";
 import type { FormContact } from "../helpers/index.js";
 import { MemberPermission, Person } from "../models/index.js";
 import { WebhookDispatcher } from "../../../shared/webhooks/index.js";
@@ -84,13 +84,21 @@ export class FormSubmissionController extends MembershipBaseController {
               const questions = this.repos.question.convertAllToModel(churchId, (await this.repos.question.loadForForm(churchId, formId)) as any[]);
               contact = ConversationalFormHelper.extractContact(questions, formSubmission.answers || []);
               followUpFirstName = contact?.firstName;
-              if (wantsPerson && contact?.email && !formSubmission.contentId) {
+              if (wantsPerson && contact?.email && formSubmission.contentType !== "person") {
                 const person = await ConversationalFormHelper.findOrCreatePerson(this.repos, churchId, contact);
                 if (person) {
                   formSubmission.contentType = "person";
                   formSubmission.contentId = person.id;
                   followUpFirstName = person.name?.first || contact.firstName;
                 }
+              }
+            }
+
+            if (form.groupId && formSubmission.contentType === "person" && formSubmission.contentId) {
+              try {
+                await this.addToGroup(churchId, form.groupId, formSubmission.contentId);
+              } catch (err) {
+                console.error("Form group auto-add failed (non-fatal):", err);
               }
             }
 
@@ -132,6 +140,15 @@ export class FormSubmissionController extends MembershipBaseController {
 
       return { error: "Please check body. formsubmissions is required" };
     });
+  }
+
+  private async addToGroup(churchId: string, groupId: string, personId: string) {
+    const existing = (await this.repos.groupMember.loadForGroup(churchId, groupId)) as any[];
+    if (existing?.some((gm) => gm.personId === personId)) return;
+    const saved = await this.repos.groupMember.save({ churchId, groupId, personId, leader: false });
+    await UserChurchHelper.createForGroupMember(churchId, personId);
+    await this.repos.groupMemberHistory.log(churchId, groupId, personId, "joined");
+    await WebhookDispatcher.emit(churchId, "group.member.added", saved);
   }
 
   private async sendEmails(formSubmission: FormSubmission, form: Form, churchId: string) {

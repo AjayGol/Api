@@ -2,7 +2,7 @@ import { BaseController } from "../../../shared/infrastructure/index.js";
 import { Permissions } from "../../../shared/helpers/Permissions.js";
 import { Repos } from "../repositories/index.js";
 
-const PUBLIC_ANON_CONTENT_TYPES = new Set(["streamingLive"]);
+const PUBLIC_ANON_CONTENT_TYPES = new Set(["streamingLive", "freeshow"]);
 
 export class MessagingBaseController extends BaseController {
   public repos: Repos;
@@ -38,5 +38,24 @@ export class MessagingBaseController extends BaseController {
 
   protected isSameChurch(au: { id?: string; churchId?: string }, churchId: string) {
     return this.isAuthenticated(au) && !!churchId && au.churchId === churchId;
+  }
+
+  // Single read gate for every messaging route: anonymous public livestream rooms are open, person
+  // notes run through the notes RBAC, and everything else needs same-church plus the per-type rule.
+  protected async canReadConversation(au: any, conv: any): Promise<boolean> {
+    if (!conv) return false;
+    if (this.isAnonPublicConversation(conv)) return true;
+    if (this.isPersonNote(conv.contentType)) return this.canViewPersonNotes(au, conv.contentType);
+    if (!this.isSameChurch(au, conv.churchId)) return false;
+    if (au.checkAccess(Permissions.content.edit)) return true;
+    if (conv.contentType === "group" || conv.contentType === "groupAnnouncement") {
+      return !!conv.contentId && (!!au.groupIds?.includes(conv.contentId) || !!au.leaderGroupIds?.includes(conv.contentId));
+    }
+    if (conv.contentType === "streamingLiveHost") return !!au.checkAccess(Permissions.chat.host);
+    if (conv.contentType === "privateMessage") {
+      const pm = (await this.repos.privateMessage.loadById(au.churchId, conv.contentId)) as any;
+      return !!pm && (pm.fromPersonId === au.personId || pm.toPersonId === au.personId);
+    }
+    return true;
   }
 }

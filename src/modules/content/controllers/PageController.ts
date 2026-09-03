@@ -20,16 +20,23 @@ export class PageController2 extends ContentBaseController {
       // Id-based (editor) loads carry no ?siteId — the page row itself knows its site (footer selection).
       const effectiveSiteId = (page as any)?.siteId ?? siteId;
 
+      let au: any = null;
+      try {
+        au = this.authUser();
+      } catch {
+        au = null;
+      }
+      // An `?id=` load only escapes the public gate when the JWT is a content editor of this church.
+      const editorRequest = !!id && !url && !!au?.churchId && au.churchId === churchId && au.checkAccess(Permissions.content.edit);
+
       let result: Page = {};
       if (page?.id !== undefined) {
-        // Only url-based (public render) requests are gated; the editor's id-based requests are unchanged.
-        if (url && !canViewPage(page, this.authUser())) {
+        if (!editorRequest && !canViewPage(page, au)) {
           return { restricted: true, visibility: page.visibility || PUBLIC_VISIBILITY };
         }
         result = page;
-        // Public (url-based) requests serve the published snapshot when one exists; the
-        // editor's id-based requests always see the working tree.
-        const snapshot = url && page.publishedAt ? await this.loadPublishedSnapshot(churchId, page.id) : null;
+        // Public requests serve the published snapshot when one exists; editors always see the working tree.
+        const snapshot = !editorRequest && page.publishedAt ? await this.loadPublishedSnapshot(churchId, page.id) : null;
         if (snapshot) {
           result.sections = snapshot.sections || [];
           const allElements = this.flattenTreeElements(result.sections);
@@ -44,7 +51,7 @@ export class PageController2 extends ContentBaseController {
           result.sections = TreeHelper.buildTree(sections, allElements);
           await TreeHelper.insertBlocks(result.sections, allElements, churchId, effectiveSiteId);
         }
-        if (url) this.removeTreeFields(result);
+        if (!editorRequest) this.removeTreeFields(result);
       }
       return result;
     });
@@ -82,6 +89,7 @@ export class PageController2 extends ContentBaseController {
       const allElements: Element[] = await this.repos.element.loadForPage(au.churchId, page.id);
       const tree = TreeHelper.buildTree(sections, allElements);
       const publishedAt = await this.repos.page.savePublished(au.churchId, page.id, JSON.stringify({ sections: tree }));
+      this.bumpSiteCache(au.churchId);
       return { publishedAt };
     });
   }
@@ -93,6 +101,7 @@ export class PageController2 extends ContentBaseController {
       const snapshot = await this.loadPublishedSnapshot(au.churchId, id);
       if (!snapshot) return this.json({ error: "Page has no published version" }, 400);
       await TreeHelper.deleteAndRestoreContent(au.churchId, id, null, snapshot);
+      this.bumpSiteCache(au.churchId);
       return { success: true };
     });
   }
@@ -102,6 +111,7 @@ export class PageController2 extends ContentBaseController {
     return this.actionWrapper(req, res, async (au) => {
       if (!au.checkAccess(Permissions.content.edit)) return this.json({}, 401);
       await this.repos.page.savePublished(au.churchId, id, null);
+      this.bumpSiteCache(au.churchId);
       return this.json({});
     });
   }
@@ -160,6 +170,7 @@ export class PageController2 extends ContentBaseController {
         });
         await Promise.all(promises);
 
+        this.bumpSiteCache(au.churchId);
         return newPage;
       }
     });
@@ -180,6 +191,7 @@ export class PageController2 extends ContentBaseController {
           promises.push(this.repos.element.save(element));
         });
         const result = await Promise.all(promises);
+        this.bumpSiteCache(au.churchId);
         return result[0];
       }
     });
@@ -197,6 +209,7 @@ export class PageController2 extends ContentBaseController {
           promises.push(this.repos.page.save(page));
         });
         const result = await Promise.all(promises);
+        this.bumpSiteCache(au.churchId);
         return result;
       }
     });
@@ -208,6 +221,7 @@ export class PageController2 extends ContentBaseController {
       if (!au.checkAccess(Permissions.content.edit)) return this.json({}, 401);
       else {
         await this.repos.page.delete(au.churchId, id);
+        this.bumpSiteCache(au.churchId);
         return this.json({});
       }
     });

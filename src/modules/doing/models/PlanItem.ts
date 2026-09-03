@@ -5,7 +5,9 @@ export class PlanItem {
   public parentId?: string;
   public sort?: number;
   public itemType?: string;
+  public actionType?: string;
   public relatedId?: string;
+  public positionId?: string;
   public label?: string;
   public description?: string;
   public seconds?: number;
@@ -14,6 +16,7 @@ export class PlanItem {
   public providerPath?: string;
   public providerContentPath?: string;
   public thumbnailUrl?: string;
+  public assignees?: string;
 
   public children?: PlanItem[];
 }

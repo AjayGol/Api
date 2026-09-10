@@ -5,7 +5,7 @@ import { fileURLToPath, pathToFileURL } from "url";
 import { Migrator, type Migration, type MigrationProvider } from "kysely";
 import { DatabaseUrlParser } from "../src/shared/helpers/DatabaseUrlParser.js";
 import { createKysely, ensureEnvironment } from "./kysely-config.js";
-import { buildCatalog, MIRRORED_DIRS } from "./commons-seed/catalog.js";
+import { buildCatalog } from "./commons-seed/catalog.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ALLOWED_HOSTS = ["localhost", "127.0.0.1"] as const;
@@ -63,7 +63,7 @@ async function migrate() {
 }
 
 async function seed(repoDir: string) {
-  const { assets, songs, authors, assetFiles, submissions, copies } = buildCatalog(repoDir);
+  const { assets, songs, authors, assetFiles, submissions } = buildCatalog(repoDir);
   const db = createKysely("commons");
   try {
     for (const row of authors) await db.insertInto("authors").values(row).execute();
@@ -76,22 +76,17 @@ async function seed(repoDir: string) {
   }
 
   if ((process.env.FILE_STORE || "").toUpperCase() !== "S3") {
-    for (const dir of [...MIRRORED_DIRS, "songs", "works", "assets", "pending"]) fs.rmSync(path.join(CONTENT_DIR, dir), { recursive: true, force: true });
-    for (const dir of MIRRORED_DIRS) {
-      const src = path.join(repoDir, dir);
-      if (fs.existsSync(src)) fs.cpSync(src, path.join(CONTENT_DIR, dir), { recursive: true });
-    }
-    // every media file lands in its asset's id-keyed live folder, whatever repo folder it came from
-    let copied = 0;
-    for (const c of copies) {
-      const from = path.join(repoDir, c.from);
-      const to = path.join(CONTENT_DIR, c.to);
+    // the local content dir holds exactly the repo's layout, the way the bucket does after the content repo's
+    // `sync push`: assetFiles.name is the catalog key and the public URL is that key under the commons prefix
+    for (const dir of ["writers", "songs", "works", "assets", "pending"]) fs.rmSync(path.join(CONTENT_DIR, dir), { recursive: true, force: true });
+    let mirrored = 0;
+    for (const dir of ["songs", "works", "writers"]) {
+      const from = path.join(repoDir, dir);
       if (!fs.existsSync(from)) continue;
-      fs.mkdirSync(path.dirname(to), { recursive: true });
-      fs.copyFileSync(from, to);
-      copied++;
+      fs.cpSync(from, path.join(CONTENT_DIR, dir), { recursive: true });
+      mirrored++;
     }
-    console.log(`  Mirrored ${MIRRORED_DIRS.join(", ")} and copied ${copied} song files into ${CONTENT_DIR}/assets`);
+    console.log(`  Mirrored ${mirrored} top-level folders of the package layout into ${CONTENT_DIR}`);
   }
   console.log(`Seeded ${songs.length} songs, ${authors.length} authors, ${assetFiles.length} files.`);
 }

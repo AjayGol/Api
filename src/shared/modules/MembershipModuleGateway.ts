@@ -2,6 +2,7 @@ import { sql } from "kysely";
 import { RepoManager } from "../infrastructure/RepoManager.js";
 import { KyselyPool } from "../infrastructure/KyselyPool.js";
 import { WebhookDispatcher } from "../webhooks/WebhookDispatcher.js";
+import { GdprErasureHelper } from "../../modules/membership/helpers/GdprErasureHelper.js";
 
 // Gateway contract; Db impl is swappable for HTTP if ever separate service.
 
@@ -26,6 +27,7 @@ export interface MembershipModuleGateway {
   loadGroupMembersForPerson(churchId: string, personId: string): Promise<{ groupId: string }[]>;
   loadGroupMemberPersonIds(churchId: string, groupId: string): Promise<string[]>;
   loadGroupLeaderPersonIds(churchId: string, groupId: string): Promise<string[]>;
+  loadPersonIdsWithPermission(churchId: string, contentType: string, action: string): Promise<string[]>;
   loadHouseholdPeople(churchId: string, personIds: string[]): Promise<{ id: string; householdId: string }[]>;
   loadChurch(churchId: string): Promise<{ id: string; name: string; subDomain: string; timeZone?: string } | null>;
   loadGroup(churchId: string, groupId: string): Promise<{ id: string; name: string; categoryName?: string; discussionsEnabled?: boolean | number; announcementsEnabled?: boolean | number } | null>;
@@ -43,6 +45,7 @@ export interface MembershipModuleGateway {
   loadSetting(churchId: string, keyName: string): Promise<string | null>;
   loadGroupsForCheckin(churchId: string, groupIds: string[]): Promise<CheckinGroup[]>;
   loadHouseholdAdults(churchId: string, personIds: string[]): Promise<HouseholdAdult[]>;
+  anonymizePerson(churchId: string, personId: string): Promise<void>;
 }
 
 export interface CheckinGroup {
@@ -175,6 +178,21 @@ class MembershipModuleGatewayDb implements MembershipModuleGateway {
     return rows.map((r) => r.personId).filter((id) => !!id);
   }
 
+  public async loadPersonIdsWithPermission(churchId: string, contentType: string, action: string): Promise<string[]> {
+    const result = await sql<{ id: string }>`
+      SELECT DISTINCT p.id
+      FROM roleMembers rm
+      INNER JOIN roles r ON r.id = rm.roleId
+      INNER JOIN rolePermissions rp ON (rp.roleId = r.id OR (rp.roleId IS NULL AND rp.churchId = rm.churchId))
+      INNER JOIN userChurches uc ON uc.userId = rm.userId AND uc.churchId = r.churchId
+      INNER JOIN people p ON p.id = uc.personId AND p.churchId = uc.churchId AND (p.removed = 0 OR p.removed IS NULL)
+      WHERE r.churchId = ${churchId}
+        AND rp.contentType = ${contentType}
+        AND rp.action = ${action}
+    `.execute(this.getDb());
+    return result.rows.map((r) => r.id).filter((id) => !!id);
+  }
+
   public async loadHouseholdPeople(churchId: string, personIds: string[]): Promise<{ id: string; householdId: string }[]> {
     if (personIds.length === 0) return [];
     const seeds = (await this.getDb().selectFrom("people")
@@ -215,10 +233,15 @@ class MembershipModuleGatewayDb implements MembershipModuleGateway {
 
   public async getOrCreateGuestPerson(churchId: string, guestInfo: GuestInfo) {
     const repos = await this.repos();
-    const existing = await repos.person.searchEmail(churchId, guestInfo.email);
-    if (existing && existing.length > 0) {
-      return { personId: existing[0].id, householdId: existing[0].householdId, email: existing[0].email };
-    }
+    const email = (guestInfo.email || "").trim();
+    const existing = email
+      ? await this.getDb().selectFrom("people").select(["id", "householdId", "email"])
+        .where("churchId", "=", churchId)
+        .where("email", "=", email)
+        .where("removed", "=", false as any)
+        .executeTakeFirst()
+      : null;
+    if (existing) return { personId: existing.id, householdId: existing.householdId, email: existing.email };
     const household = await repos.household.save({ churchId, name: guestInfo.lastName });
     // PersonRepo.save maps only the nested name/contactInfo shapes to columns.
     const person = await repos.person.save({
@@ -340,6 +363,15 @@ class MembershipModuleGatewayDb implements MembershipModuleGateway {
       .where("churchId", "=", churchId)
       .where("id", "=", personId)
       .execute();
+  }
+
+  public async anonymizePerson(churchId: string, personId: string): Promise<void> {
+    const repos = await this.repos();
+    const userChurch = await repos.userChurch.loadByPersonId(personId, churchId);
+    const userId = userChurch?.userId || null;
+    const person: any = await repos.person.load(churchId, personId);
+    await GdprErasureHelper.anonymize(churchId, personId, userId, repos);
+    await WebhookDispatcher.emit(churchId, "person.destroyed", { id: personId, churchId, email: person?.email });
   }
 }
 

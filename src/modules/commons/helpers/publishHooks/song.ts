@@ -7,7 +7,7 @@ import { SUBMISSION_TYPE_LABELS, SubmissionType } from "../SubmitValidation.js";
 import type { PublishContext, PublishHook } from "./index.js";
 
 const SONG_FIELDS = [
-  "year", "songKey", "bpm", "timeSignature", "meter", "scripture", "scriptureText", "chordPro", "videoUrl", "parentSongId", "relationLabel", "proAnswer"
+  "year", "songKey", "bpm", "timeSignature", "meter", "scripture", "scriptureText", "chordPro", "videoUrl", "parentSongId", "relationLabel", "proAnswer", "ccli"
 ] as const;
 
 // the exact license an upload is released under; WC/PD notices need no URL beyond the site itself
@@ -46,14 +46,16 @@ export const songPublishHook: PublishHook = {
     const licenseUrl = LICENSE_URLS[asset.license || ""] || existing?.licenseUrl;
     if (licenseUrl) song.licenseUrl = licenseUrl;
     const writers = writer.split(/\s*(?:,|&| and )\s*/i).map((n) => n.trim()).filter(Boolean);
+    const writerIsNew = writers.length === 1 && !(await repos.author.loadIdByName(writers[0]));
     for (let i = 0; i < writers.length; i++) {
       const id = await repos.author.findOrCreate(writers[i]);
       if (i === 0) song.authorId = id;
     }
-    // A song credited to exactly one writer claims that author row for the submitter, so they can
-    // edit their own bio and links. Co-written songs stay unclaimed — we cannot tell whose row it is.
+    // A publisher's song credited to exactly one writer, whose author row this publish created, claims that row
+    // for them so they can edit their own bio and links. Co-written songs, third-party submissions and writers
+    // already in the library stay unclaimed — we cannot tell whose row it is.
     const submittedBy = ctx.submission.submittedBy;
-    if (writers.length === 1 && submittedBy && song.authorId) {
+    if (writerIsNew && submittedBy && submittedBy === asset.publisherUserId && song.authorId) {
       const author = await repos.author.loadById(song.authorId);
       if (author && !author.userId) await repos.author.update(song.authorId, { userId: submittedBy });
     }
@@ -61,7 +63,8 @@ export const songPublishHook: PublishHook = {
     const qd = ctx.submission.payload?.qualityDetail;
     if (qd) song.qualityDetail = typeof qd === "string" ? qd : JSON.stringify(qd);
     song.contributors = JSON.stringify(appendContributors(parseContributors(existing?.contributors), contributorRows(ctx)));
-    Object.assign(song, packageFields(song, existing, asset.license || "", writer, ctx.files.map((f) => f.name || ""), (ctx.filesChanged || []).map((f) => f.name)));
+    const masterLicense = typeof detail.masterLicense === "string" ? detail.masterLicense : undefined;
+    Object.assign(song, packageFields(song, existing, asset.license || "", writer, ctx.files.map((f) => f.name || ""), (ctx.filesChanged || []).map((f) => f.name), masterLicense));
     await repos.song.upsert(song);
 
     // the two masters a person is answerable for; the content repo export reads them from the package
@@ -72,7 +75,7 @@ export const songPublishHook: PublishHook = {
 };
 
 /** The package-model columns a publish derives: confidence, first line, rights, form, keys, and the listen-gate invalidation. File names may carry their package folder; only the basename matters here. */
-export function packageFields(song: Song, existing: Song | undefined, license: string, writer: string, liveNames: string[], changedNames: string[]): Partial<Song> {
+export function packageFields(song: Song, existing: Song | undefined, license: string, writer: string, liveNames: string[], changedNames: string[], masterLicense?: string): Partial<Song> {
   const fileNames = liveNames.map(baseName);
   const changed = changedNames.map(baseName);
   const chordPro = song.chordPro ?? existing?.chordPro ?? "";
@@ -89,7 +92,7 @@ export function packageFields(song: Song, existing: Song | undefined, license: s
     hasChords,
     scoreSource,
     confidence: !invalidated && existing?.confidence === "sunday-ready" ? "sunday-ready" : base,
-    rights: JSON.stringify(rightsFor(SongPackageHelper.normalizeRights(existing?.rights), license, writer, fileNames)),
+    rights: JSON.stringify(rightsFor(SongPackageHelper.normalizeRights(existing?.rights), license, writer, fileNames, masterLicense)),
     form: JSON.stringify(formFor(SongPackageHelper.parseJson<FormMap>(existing?.form), chordPro, lyricsChanged)),
     publishedKeys: JSON.stringify(keysFor(SongPackageHelper.parseKeys(existing?.publishedKeys), song.songKey ?? existing?.songKey, song.recommendedKey ?? existing?.recommendedKey))
   };
@@ -98,15 +101,17 @@ export function packageFields(song: Song, existing: Song | undefined, license: s
 }
 
 // text/tune/arrangement follow the asset license with the writer as holder; a layer whose license did not
-// change keeps its recorded basis/source; recording and artwork exist only while their file is served
-function rightsFor(existing: RightsMap | null, license: string, writer: string, fileNames: string[]): RightsMap {
-  const layer = (prev: RightsLayer | null | undefined): RightsLayer => prev && prev.license === license ? { holder: writer || undefined, ...prev } : { license, holder: writer || undefined };
+// change keeps its recorded basis/source; recording and artwork exist only while their file is served.
+// A master recording carries its own grant (detail.masterLicense); a writer demo rides on the composition's.
+function rightsFor(existing: RightsMap | null, license: string, writer: string, fileNames: string[], masterLicense?: string): RightsMap {
+  const layer = (prev: RightsLayer | null | undefined, lic = license): RightsLayer => prev && prev.license === lic ? { holder: writer || undefined, ...prev } : { license: lic, holder: writer || undefined };
+  const recording = has(fileNames, /^master\./) ? layer(existing?.recording, masterLicense || existing?.recording?.license || license) : has(fileNames, /^demoAudio\./) ? layer(existing?.recording) : null;
   return {
     text: layer(existing?.text),
     translation: existing?.translation ?? null,
     tune: layer(existing?.tune),
     arrangement: layer(existing?.arrangement),
-    recording: has(fileNames, /^demoAudio\./) ? layer(existing?.recording) : null,
+    recording,
     artwork: has(fileNames, /^(art\.|cover\.)/) ? layer(existing?.artwork) : null
   };
 }

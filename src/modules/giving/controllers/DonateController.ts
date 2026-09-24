@@ -8,6 +8,9 @@ import { Donation, FundDonation, DonationBatch, Subscription, SubscriptionFund }
 import { Environment } from "../../../shared/helpers/Environment.js";
 import { TransactionalEmailHelper } from "../../../shared/helpers/TransactionalEmailHelper.js";
 import { DunningHelper } from "../helpers/DunningHelper.js";
+import { DonationRequestGuard } from "../helpers/DonationRequestGuard.js";
+import { isDuplicateKeyError } from "../repositories/EventLogRepo.js";
+import { RepoManager } from "../../../shared/infrastructure/RepoManager.js";
 import Axios from "axios";
 import dayjs from "dayjs";
 
@@ -241,6 +244,8 @@ export class DonateController extends GivingBaseController {
           }
         }
       } catch (error) {
+        // A concurrent delivery of the same event already claimed it; that request does the processing.
+        if (isDuplicateKeyError(error)) return this.json({}, 200);
         console.error(`Webhook processing failed for ${provider}:`, error);
         return this.json({ error: "Webhook processing failed" }, 500);
       }
@@ -257,6 +262,7 @@ export class DonateController extends GivingBaseController {
       const donation = await this.repos.donation.load(au.churchId, req.params.donationId);
       if (!donation) return this.json({ error: "Donation not found" }, 404);
       if (donation.status !== "failed") return this.json({ error: "Only failed donations can be retried" }, 400);
+      if (!donation.transactionId) return this.json({ error: "This donation has no gateway transaction to retry" }, 400);
 
       const gateways = (await this.repos.gateway.loadAll(au.churchId)) as any[];
       const gateway = gateways.find((g) => GatewayService.supportsRetry(g));
@@ -266,7 +272,7 @@ export class DonateController extends GivingBaseController {
       if (!result.success) return this.json({ error: result.error || "Retry failed" }, 400);
 
       // The gateway's invoice.paid webhook also promotes this row; updating here keeps the UI honest.
-      await this.repos.donation.updateStatus(au.churchId, donation.transactionId as string, "complete");
+      await this.repos.donation.updateStatus(au.churchId, donation.transactionId, "complete");
       return { success: true };
     });
   }
@@ -350,6 +356,19 @@ export class DonateController extends GivingBaseController {
             continue;
           }
 
+          // ACH settles days after the donation date, so the amount/date match below misses it; the transaction ids don't.
+          const obj = event.raw?.data?.object || {};
+          const txnIds = [obj.id, obj.payment_intent, obj.invoice, obj.latest_charge].filter((v) => typeof v === "string" && v);
+          let txnMatch = null;
+          for (const txnId of txnIds) {
+            txnMatch = await this.repos.donation.loadByTransactionId(au.churchId, txnId);
+            if (txnMatch) break;
+          }
+          if (txnMatch) {
+            results.push({ ...base, status: "already_imported", error: "Matched existing donation by transaction id" });
+            continue;
+          }
+
           // Secondary check: look for matching donation by amount, date, and person
           const customerData = event.customerId ? await this.repos.customer.load(au.churchId, event.customerId) as any : null;
           const personId = customerData?.personId || null;
@@ -405,6 +424,9 @@ export class DonateController extends GivingBaseController {
 
       // Anonymous is enforced here, not on the client: the email is kept for the receipt, everything identifying is dropped.
       if (donationData.anonymous) donationData.person = { id: "", email: donationData.person?.email || "", name: "" };
+      else if (donationData.person) donationData.person.id = DonationRequestGuard.resolvePersonId(donationData.person.id, au, au.checkAccess(Permissions.donations.edit));
+      const fundError = DonationRequestGuard.validateFunds(donationData.amount, donationData.funds);
+      if (fundError) return this.json({ error: fundError }, 400);
 
       const rawCurrency: string = donationData?.currency || gateway?.currency || "USD";
       const normalizedCurrency = rawCurrency.toLowerCase();
@@ -421,7 +443,7 @@ export class DonateController extends GivingBaseController {
         }
 
         // Providers without a webhook confirmation flow log the donation immediately.
-        if (GatewayService.logsDonationsImmediately(gateway)) {
+        if (GatewayService.logsDonationsImmediately(gateway) && !chargeResult.data?.alreadyRecorded) {
           try {
             await GatewayService.logEvent(gateway, churchId, chargeResult.data, chargeResult.data, this.repos);
             const logData = {
@@ -439,7 +461,8 @@ export class DonateController extends GivingBaseController {
         }
 
         try {
-          await this.sendEmails(donationData.person?.email, donationData?.church, donationData.funds, donationData?.amount, donationData?.interval, donationData?.billing_cycle_anchor, "one-time", normalizedCurrency);
+          const receipt = await this.receiptContext(churchId, donationData?.church, donationData.funds);
+          if (receipt) await this.sendEmails(donationData.person?.email, receipt.church, receipt.funds, donationData?.amount, donationData?.interval, donationData?.billing_cycle_anchor, "one-time", normalizedCurrency);
         } catch (emailErr) {
           console.warn("Charge: Failed to send confirmation email (non-fatal)", emailErr);
         }
@@ -466,6 +489,11 @@ export class DonateController extends GivingBaseController {
       if (!provider && !gatewayId) {
         return this.json({ error: "Either provider or gatewayId is required" }, 400);
       }
+
+      if (!person) return this.json({ error: "person is required" }, 400);
+      person.id = DonationRequestGuard.resolvePersonId(person.id, au, au.checkAccess(Permissions.donations.edit));
+      const fundError = DonationRequestGuard.validateFunds(amount, funds);
+      if (fundError) return this.json({ error: fundError }, 400);
 
       const gateway = await this.getGateway(churchId, provider, gatewayId);
       if (!gateway) return this.json({ error: "Gateway not found" }, 404);
@@ -536,7 +564,8 @@ export class DonateController extends GivingBaseController {
         await Promise.all(promises);
 
         try {
-          await this.sendEmails(person.email, req.body?.church, funds, amount, interval, billing_cycle_anchor, "recurring", normalizedCurrency);
+          const receipt = await this.receiptContext(churchId, req.body?.church, funds);
+          if (receipt) await this.sendEmails(person.email, receipt.church, receipt.funds, amount, interval, billing_cycle_anchor, "recurring", normalizedCurrency);
         } catch (emailErr) {
           console.warn("Subscribe: Failed to send confirmation email (non-fatal)", emailErr);
         }
@@ -615,10 +644,10 @@ export class DonateController extends GivingBaseController {
       if (donationType === "recurring") {
         const startDate = dayjs(billingCycleAnchor).format("MMM D, YYYY");
         contentRows.push(
-          `<tr>${index === 0 ? `<td style="font-size: 15px" rowspan="${funds.length}">${interval!.interval_count} ${interval!.interval}<BR><span style="font-size: 13px">(from ${startDate})</span></td>` : ""}<td style="font-size: 15px; text-overflow: ellipsis; overflow: hidden;">${fund.name}</td><td style="font-size: 15px">${formattedFund}</td></tr>`
+          `<tr>${index === 0 ? `<td style="font-size: 15px" rowspan="${funds.length}">${interval!.interval_count} ${interval!.interval}<BR><span style="font-size: 13px">(from ${startDate})</span></td>` : ""}<td style="font-size: 15px; text-overflow: ellipsis; overflow: hidden;">${DonateController.escapeHtml(fund.name)}</td><td style="font-size: 15px">${formattedFund}</td></tr>`
         );
       } else {
-        contentRows.push(`<tr><td style="font-size: 15px; text-overflow: ellipsis; overflow: hidden;">${fund.name}</td><td style="font-size: 15px">${formattedFund}</td></tr>`);
+        contentRows.push(`<tr><td style="font-size: 15px; text-overflow: ellipsis; overflow: hidden;">${DonateController.escapeHtml(fund.name)}</td><td style="font-size: 15px">${formattedFund}</td></tr>`);
       }
     });
 
@@ -627,8 +656,6 @@ export class DonateController extends GivingBaseController {
     const formattedTotal = CurrencyHelper.formatCurrencyWithLocale(amount || 0, currencyCode);
 
     const domain = Environment.appEnv === "staging" ? `${church.subDomain}.staging.b1.church` : `${church.subDomain}.b1.church`;
-
-    const title = `${church?.logo ? `<img src="${church.logo}" alt="Logo: " style="width: 100%" /> ` : ""}${church.name}`;
 
     const recurringDonationContent =
       `
@@ -642,7 +669,7 @@ export class DonateController extends GivingBaseController {
           </tr>` +
       contentRows.join(" ") +
       `${
-        transactionFee === 0
+        Math.round(transactionFee * 100) === 0
           ? ""
           : `
             <tr style="border-top: solid #dee2e6 1px">
@@ -675,7 +702,7 @@ export class DonateController extends GivingBaseController {
           </tr>` +
       contentRows.join(" ") +
       `${
-        transactionFee === 0
+        Math.round(transactionFee * 100) === 0
           ? ""
           : `
             <tr style="border-top: solid #dee2e6 1px">
@@ -694,8 +721,24 @@ export class DonateController extends GivingBaseController {
 
     const contents = donationType === "recurring" ? recurringDonationContent : oneTimeDonationContent;
 
-    await TransactionalEmailHelper.sendTransactional(Environment.supportEmail, to, title, church.churchURL as string, "Thank You For Donating", contents, "ChurchEmailTemplate.html");
+    await TransactionalEmailHelper.sendTransactional(Environment.supportEmail, to, church.name as string, `https://${domain}`, "Thank You For Donating", contents, "ChurchEmailTemplate.html", undefined, church.logo || undefined);
   };
+
+  // The receipt names the church and funds from our records, never from the request body.
+  private async receiptContext(churchId: string, requestChurch: { logo?: string } | undefined, funds: any[]) {
+    if (!churchId) return null;
+    const membershipRepos = await RepoManager.getRepos<any>("membership");
+    const church: any = await membershipRepos.church.loadById(churchId);
+    if (!church) return null;
+    const named = await Promise.all((funds || []).map(async (f: any) => ({ ...f, name: ((await this.repos.fund.load(churchId, f.id)) as any)?.name || "" })));
+    const logo = typeof requestChurch?.logo === "string" && /^https:\/\//i.test(requestChurch.logo) ? requestChurch.logo : undefined;
+    return { church: { name: church.name, subDomain: church.subDomain, logo }, funds: named };
+  }
+
+  private static escapeHtml(value: unknown): string {
+    if (value === null || value === undefined) return "";
+    return String(value).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;").replace(/'/g, "&#39;");
+  }
 
   private logDonation = async (donationData: Donation, fundData: FundDonation[]) => {
     const batch: DonationBatch = await this.repos.donationBatch.getOrCreateCurrent(donationData.churchId as string);
@@ -770,7 +813,7 @@ export class DonateController extends GivingBaseController {
         }
 
         // if google's response already includes b1.church in hostname property, no need to check in the DB then
-        if (data.hostname.includes("b1.church")) {
+        if (data.hostname === "b1.church" || data.hostname.endsWith(".b1.church")) {
           return { response: "human" };
         }
 

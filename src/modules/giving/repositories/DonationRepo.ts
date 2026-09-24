@@ -63,6 +63,7 @@ export class DonationRepo {
   }
 
   public async delete(churchId: string, id: string) {
+    await getDb().deleteFrom("fundDonations").where("churchId", "=", churchId).where("donationId", "=", id).execute();
     await getDb().deleteFrom("donations").where("id", "=", id).where("churchId", "=", churchId).execute();
   }
 
@@ -73,12 +74,16 @@ export class DonationRepo {
   public async loadAll(churchId: string) {
     const rows = await getDb().selectFrom("donations").selectAll()
       .where("churchId", "=", churchId)
+      .where((eb) => eb.or([eb("status", "is", null), eb("status", "=", "complete")]))
       .orderBy("donationDate", "desc")
       .execute();
     return rows;
   }
 
   public async deleteByBatchId(churchId: string, batchId: string) {
+    await getDb().deleteFrom("fundDonations").where("churchId", "=", churchId)
+      .where("donationId", "in", getDb().selectFrom("donations").select("id").where("churchId", "=", churchId).where("batchId", "=", batchId))
+      .execute();
     await getDb().deleteFrom("donations").where("churchId", "=", churchId).where("batchId", "=", batchId).execute();
   }
 
@@ -101,12 +106,14 @@ export class DonationRepo {
   }
 
   public async loadByPersonId(churchId: string, personId: string) {
+    // LEFT JOIN, not INNER: a donation whose fund allocation was never written still
+    // belongs in the donor's history. An INNER JOIN silently dropped those rows.
     const result = await sql<any>`
       SELECT d.*, f.id as fundId, IFNULL(f.name, 'Unkown') as fundName, fd.amount as fundAmount
       FROM donations d
-      INNER JOIN fundDonations fd on fd.donationId = d.id
+      LEFT JOIN fundDonations fd on fd.donationId = d.id
       LEFT JOIN funds f on f.id = fd.fundId
-      WHERE d.churchId = ${churchId} AND d.personId = ${personId} AND (f.taxDeductible = 1 OR f.taxDeductible IS NULL)
+      WHERE d.churchId = ${churchId} AND d.personId = ${personId} AND (d.status IS NULL OR d.status = 'complete') AND (f.taxDeductible = 1 OR f.taxDeductible IS NULL)
       ORDER BY d.donationDate DESC`.execute(getDb());
     return result.rows;
   }
@@ -136,29 +143,37 @@ export class DonationRepo {
     return row ? this.rowToModel(row) : null;
   }
 
+  // Amounts come back one row per gift currency so the controller can convert each group into the
+  // church currency before adding them up. Donor and gift counts are currency-agnostic, so they are
+  // counted once across all currencies (a donor giving in two currencies is still one donor).
   public async loadDashboardKpis(churchId: string, startDate: Date, endDate: Date, fundId?: string) {
     const sDate = DateHelper.toMysqlDate(startDate);
     const eDate = DateHelper.toMysqlDate(endDate);
-    if (fundId) {
-      const result = await sql<any>`
-        SELECT SUM(fd.amount) as totalGiving, AVG(d.amount) as avgGift, COUNT(DISTINCT d.personId) as donorCount, COUNT(DISTINCT d.id) as donationCount
-        FROM donations d
-        INNER JOIN fundDonations fd on fd.donationId = d.id
-        INNER JOIN funds f on f.id = fd.fundId
-        WHERE d.churchId = ${churchId}
-          AND d.donationDate BETWEEN ${sDate} AND ${eDate}
-          AND fd.fundId = ${fundId}`.execute(getDb());
-      return result.rows[0] ?? null;
-    } else {
-      const result = await sql<any>`
-        SELECT SUM(fd.amount) as totalGiving, AVG(d.amount) as avgGift, COUNT(DISTINCT d.personId) as donorCount, COUNT(DISTINCT d.id) as donationCount
-        FROM donations d
-        INNER JOIN fundDonations fd on fd.donationId = d.id
-        INNER JOIN funds f on f.id = fd.fundId
-        WHERE d.churchId = ${churchId}
-          AND d.donationDate BETWEEN ${sDate} AND ${eDate}`.execute(getDb());
-      return result.rows[0] ?? null;
-    }
+    const fundFilter = fundId ? sql`AND fd.fundId = ${fundId}` : sql``;
+    const counts = await sql<any>`
+      SELECT COUNT(DISTINCT d.personId) as donorCount, COUNT(DISTINCT d.id) as donationCount
+      FROM donations d
+      INNER JOIN fundDonations fd on fd.donationId = d.id
+      INNER JOIN funds f on f.id = fd.fundId
+      WHERE d.churchId = ${churchId}
+        AND (d.status IS NULL OR d.status = 'complete')
+        AND d.donationDate BETWEEN ${sDate} AND ${eDate}
+        ${fundFilter}`.execute(getDb());
+    const amounts = await sql<any>`
+      SELECT d.currency AS currency, SUM(fd.amount) as totalGiving, SUM(d.amount) as giftSum, COUNT(*) as giftRows
+      FROM donations d
+      INNER JOIN fundDonations fd on fd.donationId = d.id
+      INNER JOIN funds f on f.id = fd.fundId
+      WHERE d.churchId = ${churchId}
+        AND (d.status IS NULL OR d.status = 'complete')
+        AND d.donationDate BETWEEN ${sDate} AND ${eDate}
+        ${fundFilter}
+      GROUP BY d.currency`.execute(getDb());
+    return {
+      donorCount: Number(counts.rows[0]?.donorCount || 0),
+      donationCount: Number(counts.rows[0]?.donationCount || 0),
+      amountsByCurrency: amounts.rows as { currency: string | null; totalGiving: number; giftSum: number; giftRows: number }[]
+    };
   }
 
   public async loadSummary(churchId: string, startDate: Date, endDate: Date) {
@@ -166,24 +181,26 @@ export class DonationRepo {
     const eDate = DateHelper.toMysqlDate(endDate);
     const result = await sql<any>`
       SELECT STR_TO_DATE(concat(year(d.donationDate), ' ', week(d.donationDate, 0), ' Sunday'), '%X %V %W') AS week,
-        SUM(fd.amount) as totalAmount, f.name as fundName
+        SUM(fd.amount) as totalAmount, f.name as fundName, d.currency AS currency
       FROM donations d
       INNER JOIN fundDonations fd on fd.donationId = d.id
       INNER JOIN funds f on f.id = fd.fundId AND f.taxDeductible = 1
       WHERE d.churchId = ${churchId}
+        AND (d.status IS NULL OR d.status = 'complete')
         AND d.donationDate BETWEEN ${sDate} AND ${eDate}
-      GROUP BY year(d.donationDate), week(d.donationDate, 0), f.name
+      GROUP BY year(d.donationDate), week(d.donationDate, 0), f.name, d.currency
       ORDER BY year(d.donationDate), week(d.donationDate, 0), f.name`.execute(getDb());
     return result.rows;
   }
 
   public async loadPersonBasedSummary(churchId: string, startDate: Date, endDate: Date) {
     const result = await sql<any>`
-      SELECT d.personId, d.amount as donationAmount, fd.fundId, fd.amount as fundAmount, f.name as fundName
+      SELECT d.personId, d.amount as donationAmount, d.currency AS currency, fd.fundId, fd.amount as fundAmount, f.name as fundName
       FROM donations d
       INNER JOIN fundDonations fd on fd.donationId = d.id
       INNER JOIN funds f on f.id = fd.fundId AND f.taxDeductible = 1
       WHERE d.churchId = ${churchId}
+        AND (d.status IS NULL OR d.status = 'complete')
         AND d.donationDate BETWEEN ${DateHelper.toMysqlDate(startDate)} AND ${DateHelper.toMysqlDate(endDate)}`.execute(getDb());
     return result.rows;
   }
@@ -236,7 +253,9 @@ export class DonationRepo {
   public async loadFailedByAge(daysOld: number) {
     const result = await sql<any>`
       SELECT * FROM donations
-      WHERE status = 'failed' AND donationDate = DATE_SUB(CURDATE(), INTERVAL ${daysOld} DAY)`.execute(getDb());
+      WHERE status = 'failed'
+        AND donationDate >= DATE_SUB(CURDATE(), INTERVAL ${daysOld + 2} DAY)
+        AND donationDate < DATE_SUB(CURDATE(), INTERVAL ${daysOld - 1} DAY)`.execute(getDb());
     return result.rows;
   }
 

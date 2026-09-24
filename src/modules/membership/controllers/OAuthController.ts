@@ -45,6 +45,7 @@ export class OAuthController extends MembershipBaseController {
       if (response_type !== "code") return this.json({ error: "unsupported_response_type" }, 400);
 
       const userChurch = (await this.repos.userChurch.loadByUserId(au.id, au.churchId)) as any;
+      if (!userChurch) return this.json({ error: "access_denied" }, 400);
 
       const authCode: OAuthCode = {
         userChurchId: userChurch.id,
@@ -108,13 +109,15 @@ export class OAuthController extends MembershipBaseController {
           await this.repos.oAuthCode.delete(authCode.id);
           return this.json({ error: "invalid_grant" }, 400);
         }
+        if (!(await this.repos.oAuthCode.consume(authCode.id))) return this.json({ error: "invalid_grant" }, 400);
 
         const userChurch = (await this.repos.userChurch.load(authCode.userChurchId)) as any;
-        const user = (await this.repos.user.load(userChurch.userId)) as any;
-        const church = (await this.repos.church.loadById(userChurch.churchId)) as any;
+        const user = userChurch ? ((await this.repos.user.load(userChurch.userId)) as any) : null;
+        const church = userChurch ? ((await this.repos.church.loadById(userChurch.churchId)) as any) : null;
+        if (!user || !church) return this.json({ error: "invalid_grant" }, 400);
         const personData = await this.loadPersonAndGroups(userChurch.personId);
         const loginUserChurch: LoginUserChurch = {
-          church: { id: church.id, name: church.churchName, subDomain: church.subDomain },
+          church: { id: church.id, name: church.name, subDomain: church.subDomain },
           person: {
             id: userChurch.personId,
             membershipStatus: personData.membershipStatus,
@@ -137,8 +140,6 @@ export class OAuthController extends MembershipBaseController {
         };
         await this.repos.oAuthToken.save(token);
 
-        await this.repos.oAuthCode.delete(authCode.id);
-
         return this.json({
           access_token: token.accessToken,
           token_type: "Bearer",
@@ -152,14 +153,19 @@ export class OAuthController extends MembershipBaseController {
         const oldToken = (await this.repos.oAuthToken.loadByRefreshToken(refresh_token)) as any;
 
         if (!oldToken || oldToken.clientId !== client.clientId) return this.json({ error: "invalid_grant" }, 400);
+        if (oldToken.expiresAt && new Date(oldToken.expiresAt) < new Date()) {
+          await this.repos.oAuthToken.delete(oldToken.id);
+          return this.json({ error: "invalid_grant" }, 400);
+        }
 
         // Fetch user/church data to generate proper JWT
         const userChurch = (await this.repos.userChurch.load(oldToken.userChurchId)) as any;
-        const user = (await this.repos.user.load(userChurch.userId)) as any;
-        const church = (await this.repos.church.loadById(userChurch.churchId)) as any;
+        const user = userChurch ? ((await this.repos.user.load(userChurch.userId)) as any) : null;
+        const church = userChurch ? ((await this.repos.church.loadById(userChurch.churchId)) as any) : null;
+        if (!user || !church) return this.json({ error: "invalid_grant" }, 400);
         const personData = await this.loadPersonAndGroups(userChurch.personId);
         const loginUserChurch: LoginUserChurch = {
-          church: { id: church.id, name: church.churchName, subDomain: church.subDomain },
+          church: { id: church.id, name: church.name, subDomain: church.subDomain },
           person: {
             id: userChurch.personId,
             membershipStatus: personData.membershipStatus,
@@ -282,7 +288,7 @@ export class OAuthController extends MembershipBaseController {
         }
 
         const loginUserChurch: LoginUserChurch = {
-          church: { id: church.id, name: church.churchName, subDomain: church.subDomain },
+          church: { id: church.id, name: church.name, subDomain: church.subDomain },
           person: {
             id: userChurch.personId,
             membershipStatus: personData.membershipStatus,
@@ -538,6 +544,7 @@ h1{font-size:24px;margin-bottom:16px}p{color:rgba(255,255,255,0.7);line-height:1
   public async getClientByClientId(@requestParam("clientId") clientId: string, req: express.Request<{}, {}, null>, res: express.Response): Promise<any> {
     return this.actionWrapper(req, res, async (_au) => {
       const result = (await this.repos.oAuthClient.loadByClientId(clientId)) as any;
+      if (!result) return this.json({}, 404);
       result.clientSecret = null;
       return result;
     });

@@ -1,7 +1,7 @@
 import { controller, httpPost, httpGet, requestParam, httpDelete } from "inversify-express-utils";
 import express from "express";
 import { MembershipBaseController } from "./MembershipBaseController.js";
-import { FormSubmission, Answer, Form, Church } from "../models/index.js";
+import { FormSubmission, Answer, Form, Church, Question } from "../models/index.js";
 import { Permissions, Environment, ConversationalFormHelper, UserChurchHelper } from "../helpers/index.js";
 import type { FormContact } from "../helpers/index.js";
 import { MemberPermission, Person } from "../models/index.js";
@@ -40,17 +40,18 @@ export class FormSubmissionController extends MembershipBaseController {
   @httpGet("/formId/:formId")
   public async getByFormId(@requestParam("formId") formId: string, req: express.Request<{}, {}, null>, res: express.Response): Promise<any> {
     return this.actionWrapper(req, res, async (au) => {
-      if (!this.formAccess(au, formId)) return this.json([], 401);
+      if (!(await this.formAccess(au, formId, "view"))) return this.json([], 401);
       else {
-        const formSubmissions = await this.repos.formSubmission.convertAllToModel(au.churchId, (await this.repos.formSubmission.loadByFormId(au.churchId, formId)) as any[]);
-        console.log("Form Submissions", formSubmissions.length);
-        const promises: Promise<FormSubmission>[] = [];
-        formSubmissions.forEach((formSubmission: FormSubmission) => {
-          promises.push(this.appendForm(au.churchId, formSubmission));
-          promises.push(this.appendQuestions(au.churchId, formSubmission));
-          promises.push(this.appendAnswers(au.churchId, formSubmission));
+        const formSubmissions: FormSubmission[] = await this.repos.formSubmission.convertAllToModel(au.churchId, (await this.repos.formSubmission.loadByFormId(au.churchId, formId)) as any[]);
+        if (formSubmissions.length === 0) return formSubmissions;
+        const form = this.repos.form.convertToModel(au.churchId, await this.repos.form.load(au.churchId, formId));
+        const questions = this.repos.question.convertAllToModel(au.churchId, (await this.repos.question.loadForForm(au.churchId, formId)) as any[]);
+        const answers = this.repos.answer.convertAllToModel(au.churchId, (await this.repos.answer.loadForFormSubmissions(au.churchId, formSubmissions.map((fs) => fs.id))) as any[]);
+        formSubmissions.forEach((formSubmission) => {
+          formSubmission.form = form;
+          formSubmission.questions = questions;
+          formSubmission.answers = answers.filter((a) => a.formSubmissionId === formSubmission.id);
         });
-        await Promise.all(promises);
         return formSubmissions;
       }
     });
@@ -75,10 +76,31 @@ export class FormSubmissionController extends MembershipBaseController {
             results.push({ error: `You're not allowed to submit ${form.name}` });
           } else {
             formSubmission.churchId = churchId;
+            const canManage = au?.churchId === churchId && (await this.formAccess(au, formId));
+            if (!canManage && !this.isWithinAccessWindow(form)) {
+              results.push({ error: `${form.name} is not accepting submissions` });
+              continue;
+            }
+            let existingAnswerIds: string[] = [];
+            if (formSubmission.id) {
+              const existing = canManage ? await this.repos.formSubmission.load(churchId, formSubmission.id) : null;
+              if (!existing || existing.formId !== formId) {
+                results.push({ error: `You're not allowed to edit this submission` });
+                continue;
+              }
+              existingAnswerIds = ((await this.repos.answer.loadForFormSubmission(churchId, formSubmission.id)) as any[]).map((a) => a.id);
+            }
+            if (!canManage && formSubmission.contentType === "person" && formSubmission.contentId !== au?.personId) {
+              formSubmission.contentType = null;
+              formSubmission.contentId = null;
+            }
 
             const wantsPerson = form.autoCreatePerson === true;
             const wantsFollowUp = !!(form.followUpSubject && form.followUpBody);
             const questions = this.repos.question.convertAllToModel(churchId, (await this.repos.question.loadForForm(churchId, formId)) as any[]);
+            const questionIds = new Set(questions.map((q) => q.id));
+            formSubmission.answers = (formSubmission.answers || []).filter((a) => questionIds.has(a.questionId));
+            formSubmission.answers.forEach((a) => { if (a.id && !existingAnswerIds.includes(a.id)) delete a.id; });
             const contact: FormContact = ConversationalFormHelper.extractContact(questions, formSubmission.answers || []);
             let followUpFirstName: string = contact?.firstName;
             if (wantsPerson && contact?.email && formSubmission.contentType !== "person") {
@@ -117,7 +139,7 @@ export class FormSubmissionController extends MembershipBaseController {
             await WebhookDispatcher.emit(churchId, "form.submission.created", { ...savedSubmissions, formName: form.name, submitterName });
 
             try {
-              await this.sendEmails(formSubmission, form, churchId);
+              await this.sendEmails(formSubmission, questions, form, churchId);
             } catch (err) {
               console.error("Form submission notifications failed (non-fatal):", err);
             }
@@ -139,6 +161,15 @@ export class FormSubmissionController extends MembershipBaseController {
     });
   }
 
+  private isWithinAccessWindow(form: Form) {
+    const day = 24 * 60 * 60 * 1000;
+    const now = Date.now();
+    // A day of slack either side: the window is set as calendar dates in the church's local time.
+    if (form.accessStartTime && now < new Date(form.accessStartTime).getTime() - day) return false;
+    if (form.accessEndTime && now > new Date(form.accessEndTime).getTime() + 2 * day) return false;
+    return true;
+  }
+
   private async addToGroup(churchId: string, groupId: string, personId: string) {
     const existing = (await this.repos.groupMember.loadForGroup(churchId, groupId)) as any[];
     if (existing?.some((gm) => gm.personId === personId)) return;
@@ -148,7 +179,7 @@ export class FormSubmissionController extends MembershipBaseController {
     await WebhookDispatcher.emit(churchId, "group.member.added", saved);
   }
 
-  private async sendEmails(formSubmission: FormSubmission, form: Form, churchId: string) {
+  private async sendEmails(formSubmission: FormSubmission, questions: Question[], form: Form, churchId: string) {
     // send email to form members that have emailNotification set to true
     const memberPermissions = (await this.repos.memberPermission.loadByEmailNotification(churchId, "form", form.id, true)) as any;
     const church: Church = await this.repos.church.loadById(churchId);
@@ -158,8 +189,8 @@ export class FormSubmissionController extends MembershipBaseController {
         const people = (await this.repos.person.loadByIds(formSubmission.churchId, ids)) as any[];
         if ((people as any[])?.length > 0) {
           const contentRows: any[] = [];
-          formSubmission.questions.forEach((q) => {
-            formSubmission.answers.forEach((a) => {
+          questions.forEach((q) => {
+            (formSubmission.answers || []).forEach((a) => {
               if (q.id === a.questionId) {
                 contentRows.push("<tr><th style=\"font-size: 16px\" width=\"30%\">" + this.escapeHtml(q.title) + "</th><td style=\"font-size: 15px\">" + this.escapeHtml(a.value) + "</td></tr>");
               }

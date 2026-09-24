@@ -2,7 +2,7 @@ import { controller, httpPost, httpGet, requestParam } from "inversify-express-u
 import express from "express";
 import { DoingBaseController } from "./DoingBaseController.js";
 import { Task } from "../models/index.js";
-import { WorkflowHelper, DirectoryUpdateHelper } from "../helpers/index.js";
+import { WorkflowHelper, DirectoryUpdateHelper, AccountDeletionHelper } from "../helpers/index.js";
 import { Permissions } from "../../../shared/helpers/index.js";
 import { InternalEventBus } from "../../../shared/events/InternalEventBus.js";
 
@@ -12,7 +12,8 @@ export class TaskController extends DoingBaseController {
   public async getTimeline(req: express.Request<{}, {}, null>, res: express.Response): Promise<any> {
     return this.actionWrapper(req, res, async (au) => {
       const taskIds = typeof req.query.taskIds === "string" ? req.query.taskIds.split(",") : req.query.taskIds ? [String(req.query.taskIds)] : [];
-      return await this.repos.task.loadTimeline(au.churchId, au.personId, taskIds);
+      const rows = (await this.repos.task.loadTimeline(au.churchId, au.personId, taskIds)) as Task[];
+      return rows.filter((t) => this.canViewTask(au, t));
     });
   }
 
@@ -26,6 +27,7 @@ export class TaskController extends DoingBaseController {
   @httpGet("/directoryUpdate/:personId")
   public async getPersonDirectoryUpdate(@requestParam("personId") personId: string, req: express.Request<{}, {}, null>, res: express.Response): Promise<any> {
     return this.actionWrapper(req, res, async (au) => {
+      if (personId !== au.personId && !au.checkAccess(Permissions.tasks.view)) return this.json({}, 401);
       return await this.repos.task.loadForDirectoryUpdate(au.churchId, personId);
     });
   }
@@ -55,8 +57,18 @@ export class TaskController extends DoingBaseController {
   @httpGet("/:id")
   public async get(@requestParam("id") id: string, req: express.Request<{}, {}, null>, res: express.Response): Promise<any> {
     return this.actionWrapper(req, res, async (au) => {
-      return await this.repos.task.load(au.churchId, id);
+      const task = (await this.repos.task.load(au.churchId, id)) as Task;
+      if (task && !this.canViewTask(au, task)) return this.json({}, 401);
+      return task;
     });
+  }
+
+  private canViewTask(au: { personId?: string; groupIds?: string[]; checkAccess: (p: any) => boolean }, task: Task): boolean {
+    if (au.checkAccess(Permissions.tasks.view)) return true;
+    const isMe = (type?: string, id?: string) => type === "person" && !!id && id === au.personId;
+    const isMyGroup = (type?: string, id?: string) => type === "group" && !!id && !!au.groupIds?.includes(id);
+    return isMe(task.associatedWithType, task.associatedWithId) || isMe(task.createdByType, task.createdById) || isMe(task.assignedToType, task.assignedToId)
+      || isMyGroup(task.assignedToType, task.assignedToId) || isMyGroup(task.createdByType, task.createdById);
   }
 
   @httpGet("/")
@@ -77,14 +89,43 @@ export class TaskController extends DoingBaseController {
   @httpPost("/")
   public async save(req: express.Request<{}, {}, Task[]>, res: express.Response): Promise<any> {
     return this.actionWrapper(req, res, async (au) => {
-      // Member directory updates are self-service; staff task creation requires Edit.
-      if (req.query?.type !== "directoryUpdate" && !au.checkAccess(Permissions.tasks.edit)) return this.json({}, 401);
+      const type = req.query?.type;
+      // Member directory updates and account deletion requests are self-service; staff task creation requires Edit.
+      const selfService = type === "directoryUpdate" || type === AccountDeletionHelper.taskType;
+      if (!selfService && !au.checkAccess(Permissions.tasks.edit)) return this.json({}, 401);
       // Cards must use the card endpoints (which run routing + per-card permissions).
       if (req.body.some((task) => task.workflowId || task.stepId)) return this.json({ message: "Workflow cards must use the card endpoints" }, 400);
+      if (type === AccountDeletionHelper.taskType) {
+        // One request per person: re-submitting just returns the open one.
+        const existing = await this.repos.task.loadForAccountDeletion(au.churchId, au.personId);
+        if (existing.length > 0) return existing;
+        const task = req.body[0] || {};
+        const prepared = await AccountDeletionHelper.prepareRequest(au, task);
+        if (prepared.error) return this.json({ message: prepared.error }, 400);
+        const saved = await this.repos.task.save(task);
+        await AccountDeletionHelper.notifyReviewers(saved);
+        await InternalEventBus.publish(au.churchId, "task.updated", saved);
+        return [saved];
+      }
       const result: Task[] = [];
+      const memberDirectoryUpdate = type === "directoryUpdate" && !au.checkAccess(Permissions.tasks.edit);
+      if (memberDirectoryUpdate && req.body.some((task) => task.id)) return this.json({}, 401);
       for (const task of req.body) {
+        if (memberDirectoryUpdate) {
+          task.status = "Open";
+          task.associatedWithType = "person";
+          task.associatedWithId = au.personId;
+          task.createdByType = "person";
+          task.createdById = au.personId;
+        }
+        if (task.id) {
+          const existing = await this.repos.task.load(au.churchId, task.id);
+          if (existing?.taskType === AccountDeletionHelper.taskType && existing.status !== "Closed" && task.status === "Closed") {
+            return this.json({ message: "Account deletion requests must be decided from the review action" }, 400);
+          }
+        }
         task.churchId = au.churchId;
-        if (req.query?.type === "directoryUpdate") await DirectoryUpdateHelper.handleDirectoryUpdate(au.churchId, task);
+        if (type === "directoryUpdate") await DirectoryUpdateHelper.handleDirectoryUpdate(au.churchId, task);
         const saved = await this.repos.task.save(task);
         await InternalEventBus.publish(au.churchId, "task.updated", saved);
         result.push(saved);
@@ -170,6 +211,21 @@ export class TaskController extends DoingBaseController {
       if (!task) return this.json({}, 404);
       if (!this.canEditCard(au, task)) return this.json({}, 401);
       return await op(task);
+    });
+  }
+
+  // Staff decide a member's account-deletion request (approve = GDPR anonymize, reject requires a reason).
+  @httpPost("/:id/accountDeletionDecision")
+  public async accountDeletionDecision(@requestParam("id") id: string, req: express.Request<{}, {}, { outcome?: string; reason?: string }>, res: express.Response): Promise<any> {
+    return this.actionWrapper(req, res, async (au) => {
+      if (!au.checkAccess(Permissions.people.edit)) return this.json({}, 401);
+      const task = (await this.repos.task.load(au.churchId, id)) as Task;
+      if (!task || task.taskType !== AccountDeletionHelper.taskType) return this.json({}, 404);
+      if (task.status !== "Open") return this.json({ message: "Request is already closed" }, 400);
+      const result = await AccountDeletionHelper.completeDecision(task, req.body || {}, this.repos);
+      if (result.error) return this.json({ message: result.error }, 400);
+      await InternalEventBus.publish(au.churchId, "task.updated", result.task);
+      return result.task;
     });
   }
 

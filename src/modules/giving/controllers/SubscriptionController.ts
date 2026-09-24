@@ -11,7 +11,7 @@ export class SubscriptionController extends GivingBaseController {
   public async get(@requestParam("id") id: string, req: express.Request<{}, {}, null>, res: express.Response): Promise<any> {
     return this.actionWrapper(req, res, async (au) => {
       if (!au.checkAccess(Permissions.donations.viewSummary)) return this.json(null, 401);
-      else return this.repos.customer.convertToModel(au.churchId, await this.repos.customer.load(au.churchId, id));
+      else return await this.repos.subscription.load(au.churchId, id);
     });
   }
 
@@ -19,7 +19,7 @@ export class SubscriptionController extends GivingBaseController {
   public async getAll(req: express.Request<{}, {}, null>, res: express.Response): Promise<any> {
     return this.actionWrapper(req, res, async (au) => {
       if (!au.checkAccess(Permissions.donations.viewSummary)) return this.json(null, 401);
-      else return this.repos.customer.convertAllToModel(au.churchId, (await this.repos.customer.loadAll(au.churchId)) as any[]);
+      else return await this.repos.subscription.loadAll(au.churchId);
     });
   }
 
@@ -47,10 +47,10 @@ export class SubscriptionController extends GivingBaseController {
           gateway = await GatewayService.getGatewayForChurch(au.churchId, { requiredCapability: "supportsSubscriptions" }, this.repos.gateway).catch((): null => null);
         }
 
-        let permission = au.checkAccess(Permissions.donations.edit) || existingSub?.personId === au.personId;
+        let permission = au.checkAccess(Permissions.donations.edit) || (!!au.personId && existingSub?.personId === au.personId);
 
         // Gateway-created schedules may have no local row; ask the provider to verify ownership.
-        if (!permission && !existingSub && gateway) {
+        if (!permission && !existingSub && gateway && au.personId) {
           permission = await GatewayService.verifySubscriptionOwnership(gateway, subscription.id, au.personId, this.repos);
         }
         if (!permission) continue;
@@ -126,13 +126,13 @@ export class SubscriptionController extends GivingBaseController {
   // Shared by delete/pause/resume; verifies donations.edit or ownership (gateway-created schedules via provider).
   private async resolveSubscriptionForAction(au: any, id: string, provider?: string): Promise<{ subscription: any; gateway: any; permission: boolean }> {
     const subscription = await this.repos.subscription.load(au.churchId, id) as any;
-    let permission = au.checkAccess(Permissions.donations.edit) || subscription?.personId === au.personId;
+    let permission = au.checkAccess(Permissions.donations.edit) || (!!au.personId && subscription?.personId === au.personId);
 
     let gateway = provider
       ? await GatewayService.getGatewayForChurch(au.churchId, { provider }, this.repos.gateway).catch((): null => null)
       : null;
 
-    if (!permission && !subscription && gateway) {
+    if (!permission && !subscription && gateway && au.personId) {
       permission = await GatewayService.verifySubscriptionOwnership(gateway, id, au.personId, this.repos);
     }
 

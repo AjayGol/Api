@@ -3,6 +3,7 @@ import { injectable } from "inversify";
 import { UniqueIdHelper } from "@churchapps/apihelper";
 import { getDb } from "../db/index.js";
 import { Message } from "../models/index.js";
+import { retryOnDeadlock } from "../../../shared/helpers/retryOnDeadlock.js";
 
 @injectable()
 export class MessageRepo {
@@ -12,7 +13,7 @@ export class MessageRepo {
 
   private async create(model: Message): Promise<Message> {
     model.id = UniqueIdHelper.shortId();
-    await getDb().insertInto("messages").values({
+    await retryOnDeadlock(() => getDb().insertInto("messages").values({
       id: model.id,
       churchId: model.churchId,
       conversationId: model.conversationId,
@@ -21,7 +22,7 @@ export class MessageRepo {
       messageType: model.messageType,
       content: model.content,
       timeSent: sql`NOW()`
-    }).execute();
+    }).execute());
     return model;
   }
 
@@ -55,6 +56,20 @@ export class MessageRepo {
       .where("conversationId", "=", conversationId)
       .orderBy("timeSent")
       .execute();
+  }
+
+  public async loadLatestPerPerson(churchId: string, conversationId: string): Promise<Message[]> {
+    const result = await sql<any>`
+      SELECT m.personId, m.messageType, m.content, m.timeSent
+      FROM messages m
+      INNER JOIN (
+        SELECT personId, MAX(timeSent) AS maxTime FROM messages
+        WHERE churchId=${churchId} AND conversationId=${conversationId} AND personId IS NOT NULL
+        GROUP BY personId
+      ) latest ON latest.personId=m.personId AND latest.maxTime=m.timeSent
+      WHERE m.churchId=${churchId} AND m.conversationId=${conversationId}
+    `.execute(getDb());
+    return result.rows as Message[];
   }
 
   public async loadForConversationPaginated(

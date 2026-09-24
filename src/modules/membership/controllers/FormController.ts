@@ -28,8 +28,10 @@ export class FormController extends MembershipBaseController {
   public async getStandAlone(@requestParam("id") id: string, req: express.Request<{}, {}, null>, res: express.Response): Promise<any> {
     return this.actionWrapper(req, res, async (au) => {
       // authz-exempt: churchId identifies the embeddable public form's owner church
-      const churchId = req?.query?.churchId.toString();
+      const churchId = req?.query?.churchId?.toString();
+      if (!churchId) return this.json({ error: "churchId is required" }, 400);
       const form = this.repos.form.convertToModel("", await this.repos.form.load(churchId, id));
+      if (!form) return this.json({}, 404);
       if (form.contentType !== "form" || (!au.id && form.restricted)) return this.json({ restricted: true }, 401);
       else return form;
     });
@@ -38,7 +40,7 @@ export class FormController extends MembershipBaseController {
   @httpGet("/:id")
   public async get(@requestParam("id") id: string, req: express.Request<{}, {}, null>, res: express.Response): Promise<any> {
     return this.actionWrapper(req, res, async (au) => {
-      if (!this.formAccess(au, id, "view")) return this.json({}, 401);
+      if (!(await this.formAccess(au, id, "view"))) return this.json({}, 401);
       else return await this.repos.form.convertToModel(au.churchId, await this.repos.form.load(au.churchId, id));
     });
   }
@@ -67,11 +69,13 @@ export class FormController extends MembershipBaseController {
       const memberPermissionPromises: Promise<MemberPermission>[] = [];
       if (req.body.length === 0) return res.status(400).send("Request body cannot be empty array!");
       for (const form of req.body) {
-        if ((!form.id && (au.checkAccess(Permissions.forms.admin) || au.checkAccess(Permissions.forms.edit))) || (form.id && await this.formAccess(au, form.id))) {
-          form.churchId = au.churchId;
-          if (!form.id && form.contentType === "form") newStandAloneFormPromises.push(this.repos.form.save(form));
-          else formPromises.push(this.repos.form.save(form));
-        } else return this.json({}, 401);
+        const allowed = (!form.id && (au.checkAccess(Permissions.forms.admin) || au.checkAccess(Permissions.forms.edit))) || (form.id && await this.formAccess(au, form.id));
+        if (!allowed) return this.json({}, 401);
+      }
+      for (const form of req.body) {
+        form.churchId = au.churchId;
+        if (!form.id && form.contentType === "form") newStandAloneFormPromises.push(this.repos.form.save(form));
+        else formPromises.push(this.repos.form.save(form));
       }
       const formResult = await this.repos.form.convertAllToModel(au.churchId, await Promise.all(formPromises));
       const newStandAloneFormResult = await this.repos.form.convertAllToModel(au.churchId, await Promise.all(newStandAloneFormPromises));
@@ -97,7 +101,9 @@ export class FormController extends MembershipBaseController {
       if (!await this.formAccess(au, id)) return this.json({}, 401);
       const form = await this.repos.form.load(au.churchId, id);
       if (!form) return this.json({}, 404);
-      const questions = await this.repos.question.loadForForm(au.churchId, id);
+      // Convert to models first - loadForForm returns raw rows whose choices are still
+      // JSON strings, and re-saving those would encode them a second time.
+      const questions = this.repos.question.convertAllToModel(au.churchId, await this.repos.question.loadForForm(au.churchId, id));
       const savedForm = await this.repos.form.save({ ...form, id: undefined, name: form.name + " (Copy)", archived: false });
       for (const q of questions) {
         await this.repos.question.save({ ...q, id: undefined, formId: savedForm.id });

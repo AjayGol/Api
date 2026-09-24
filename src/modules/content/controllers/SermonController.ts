@@ -90,6 +90,7 @@ export class SermonController extends ContentBaseController {
   public async getSermonTvFeed(@requestParam("churchId") churchId: string, @requestParam("sermonId") sermonId: string, req: express.Request<{}, {}, null>, res: express.Response): Promise<any> {
     return this.actionWrapperAnon(req, res, async () => {
       const sermon = await this.repos.sermon.loadById(sermonId, churchId);
+      if (!sermon) return this.json({}, 404);
 
       const result: any = {
         id: sermon.id,
@@ -167,17 +168,20 @@ export class SermonController extends ContentBaseController {
   @httpGet("/lookup")
   public async lookup(req: express.Request<{}, {}, null>, res: express.Response): Promise<any> {
     return this.actionWrapperAnon(req, res, async () => {
+      const videoData = req.query.videoData?.toString() || "";
+      if (!/^[A-Za-z0-9_:-]{1,64}$/.test(videoData)) return this.json({ error: "Invalid video id" }, 400);
       if (req.query.videoType === "youtube") {
-        return await YouTubeHelper.getSermon(req.query.videoData as string);
+        return await YouTubeHelper.getSermon(videoData);
       } else {
-        return await VimeoHelper.getSermon(req.query.videoData as string);
+        return await VimeoHelper.getSermon(videoData);
       }
     });
   }
 
   @httpGet("/socialSuggestions")
   public async socialSuggestions(req: express.Request<{}, {}, null>, res: express.Response): Promise<any> {
-    return this.actionWrapper(req, res, async () => {
+    return this.actionWrapper(req, res, async (au) => {
+      if (!au.checkAccess(Permissions.streamingServices.edit)) return this.json({}, 401);
       const youtubeVideoId = req.query?.youtubeVideoId?.toString();
       if (youtubeVideoId && youtubeVideoId !== "") {
         try {
@@ -197,7 +201,7 @@ export class SermonController extends ContentBaseController {
           }
           return { error: null, posts };
         } catch (error) {
-          throw new Error(error);
+          throw error instanceof Error ? error : new Error(String(error));
         }
       }
       return { error: "Invalid or missing YouTube video ID", posts: [] };
@@ -206,7 +210,8 @@ export class SermonController extends ContentBaseController {
 
   @httpGet("/outline")
   public async lessonOutline(req: express.Request<{}, {}, null>, res: express.Response): Promise<any> {
-    return this.actionWrapper(req, res, async () => {
+    return this.actionWrapper(req, res, async (au) => {
+      if (!au.checkAccess(Permissions.streamingServices.edit)) return this.json({}, 401);
       const url = req.query?.url?.toString();
       const title = req.query?.title?.toString();
       const author = req.query?.author?.toString();
@@ -216,7 +221,7 @@ export class SermonController extends ContentBaseController {
           const result = await OpenAiHelper.generateLessonOutline(url, title, author);
           return result;
         } catch (error) {
-          throw new Error(error);
+          throw error instanceof Error ? error : new Error(String(error));
         }
       }
       return { error: "Invalid or missing URL parameter" };

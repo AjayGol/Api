@@ -3,10 +3,12 @@ import { sql } from "kysely";
 import { UniqueIdHelper } from "@churchapps/apihelper";
 import { getDb } from "../db/index.js";
 import { Submission } from "../models/index.js";
+import { NEW_PACKAGE_TYPES } from "../helpers/SubmitValidation.js";
 
 export interface QueueFilter {
   status?: string;
   assetType?: string;
+  assetTypes?: string[];
   page?: number;
   pageSize?: number;
 }
@@ -70,6 +72,7 @@ export class SubmissionRepo {
     const page = Math.max(filter.page || 1, 1);
     let q = this.joined().where("submissions.status", "=", filter.status || "pending");
     if (filter.assetType) q = q.where("assets.assetType", "=", filter.assetType);
+    if (filter.assetTypes) q = filter.assetTypes.length ? q.where("assets.assetType", "in", filter.assetTypes) : q.where(sql<boolean>`1 = 0`);
     const rows = await q.orderBy("submissions.triageScore", "desc").orderBy("submissions.submittedAt", "asc").orderBy("submissions.createdAt", "asc").limit(pageSize).offset((page - 1) * pageSize).execute();
     return rows.map((r) => fromRow<QueueRow>(r));
   }
@@ -100,8 +103,10 @@ export class SubmissionRepo {
     return Number(row?.n || 0);
   }
 
-  public async countSubmittedSince(userId: string, since: Date): Promise<number> {
-    const row = await getDb().selectFrom("submissions").select(sql<number>`count(*)`.as("n")).where("submittedBy", "=", userId).where("submittedAt", ">=", since).executeTakeFirst();
+  /** New-package submissions the user has ever sent for review — the lifetime song cap counts these. */
+  public async countSongsByUser(userId: string): Promise<number> {
+    const row = await getDb().selectFrom("submissions").select(sql<number>`count(*)`.as("n"))
+      .where("submittedBy", "=", userId).where("status", "!=", "draft").where("type", "in", [...NEW_PACKAGE_TYPES]).executeTakeFirst();
     return Number(row?.n || 0);
   }
 

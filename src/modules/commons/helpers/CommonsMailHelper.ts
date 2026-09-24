@@ -11,6 +11,7 @@ const REJECT_REASONS: Record<string, string> = {
   duplicate: "It looks like a duplicate of something already in the library.",
   licensing: "We couldn't confirm the licensing for this work.",
   ccli: 'This appears to be a song in the CCLI catalog, which cannot be released here. If it is licensed through CCLI, churches can find it on SongSelect: <a href="{songselect}">{songselect}</a>',
+  ai: "The words or melody appear to be AI-generated. WorshipCommons only accepts songs written by people; AI-assisted recordings of a human-written song are fine.",
   offtopic: "It isn't a fit for the WorshipCommons library.",
   incomplete: "The submission was missing required information or files.",
   other: "A reviewer decided not to add it at this time."
@@ -23,7 +24,7 @@ const RESOLUTION_TEXT: Record<string, string> = {
 };
 
 function reportedTitle(report: Report): string {
-  return (report.contentText || "").trim() || "the content you reported";
+  return esc((report.contentText || "").trim()) || "the content you reported";
 }
 
 function rawTitle(sub: Submission): string {
@@ -125,16 +126,26 @@ export class CommonsMailHelper {
   static notifyReportResolved(report: Report, resolution: string): Promise<void> {
     const what = RESOLUTION_TEXT[resolution] || RESOLUTION_TEXT.dismissed;
     let body = `<p>Your report about <strong>${reportedTitle(report)}</strong> (reference <strong>${report.id}</strong>) is resolved.</p><p>${what}</p>`;
-    if (report.resolutionNote?.trim()) body += `<p>${report.resolutionNote.trim()}</p>`;
+    if (report.resolutionNote?.trim()) body += `<p>${esc(report.resolutionNote.trim())}</p>`;
     body += `<p>Questions? Email ${Environment.supportEmail}.</p>`;
     return this.mailTo(report.email, `Your report (${report.id}) is resolved`, body);
   }
 
   /** The publisher of a song taken down by a report — reply-to-counter-notice is the appeal path. */
   static notifyTakedown(asset: Asset, report: Report): Promise<void> {
-    const title = (asset.name || "").trim() || "your song";
+    const title = esc((asset.name || "").trim()) || "your song";
     const why = report.reason === "copyright" ? "a copyright report" : "a policy report";
     return this.mailWriter(asset.publisherUserId, `${title} was taken down from WorshipCommons`, `<p><strong>${title}</strong> is no longer available on WorshipCommons after ${why}.</p><p>If you believe this is a mistake, reply to this email with a counter-notice explaining why you have the right to publish it.</p><p>Questions? Email ${Environment.supportEmail}.</p>`);
+  }
+
+  /** Instant internal ping so the team sees each new submission the moment it lands. */
+  static async notifySubmittedInternal(title: string): Promise<void> {
+    try {
+      const safe = title.replace(/</g, "&lt;");
+      await TransactionalEmailHelper.sendTransactional(Environment.supportEmail, Environment.supportEmail, APP, Environment.worshipCommonsRoot || "", `New WorshipCommons submission: ${safe}`, `<p><strong>${safe}</strong> was just submitted for review.</p><p>It is waiting in the review queue.</p>`);
+    } catch (e) {
+      console.error("[CommonsMailHelper] internal submission ping failed:", e);
+    }
   }
 
   private static async mailWriter(userId: string | undefined, subject: string, contents: string): Promise<void> {

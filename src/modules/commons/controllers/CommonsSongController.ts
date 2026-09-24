@@ -38,7 +38,8 @@ export class CommonsSongController extends CommonsBaseController {
   public async getAll(req: express.Request, res: express.Response): Promise<any> {
     return this.actionWrapperAnon(req, res, async () => {
       const str = (k: string) => String(req.query?.[k] || "").trim().slice(0, MAX_QUERY) || undefined;
-      return await this.withUrls(await this.repos.song.loadPublishedSummaries({ sundayReady: req.query?.sundayReady === "true", confidence: str("confidence"), language: str("language"), q: str("q") }));
+      const rows = await this.withUrls(await this.repos.song.loadPublishedSummaries({ sundayReady: req.query?.sundayReady === "true", confidence: str("confidence"), language: str("language"), q: str("q") }));
+      return rows.map((row) => SongPackageHelper.listRow(row));
     });
   }
 
@@ -111,15 +112,13 @@ export class CommonsSongController extends CommonsBaseController {
     });
   }
 
-  // The single fetch the song page needs; `rating.mine` only with a user JWT (actionWrapper tolerates anonymous callers).
+  // The single fetch the song page needs. actionWrapper tolerates anonymous callers.
   @httpGet("/:id/page")
   public async page(req: express.Request, res: express.Response): Promise<any> {
-    return this.actionWrapper(req, res, async (au) => {
+    return this.actionWrapper(req, res, async (_au) => {
       const row = await this.repos.song.loadById(String(req.params.id));
       if (!row || row.status !== "published") return this.json({}, 404);
       const song = await this.detail(row);
-      const mine = au.id ? (await this.repos.rating.load(song.id || "", au.id))?.stars ?? null : null;
-      const count = row.ratingCount || 0;
       const family = await this.withUrls(SongPackageHelper.family(row, await this.repos.song.loadFamily(row.parentSongId || row.id || "")));
       const familyIds = new Set(family.map((f) => f.id || ""));
       // ponytail: scores every published song of the language in memory (a few hundred rows); index it when the catalog grows past ~10k
@@ -129,7 +128,6 @@ export class CommonsSongController extends CommonsBaseController {
       const similar = withUrls.map((s, i) => ({ ...s, reason: picked[i].reason }));
       return {
         song,
-        rating: { average: count ? Math.round(((row.ratingSum || 0) / count) * 10) / 10 : 0, count, mine },
         history: await PublishHelper.history(this.repos, song.id || ""),
         family,
         similar
@@ -181,13 +179,14 @@ export class CommonsSongController extends CommonsBaseController {
         if (!file?.base64) continue;
         const ext = (file.name?.includes(".") ? file.name.split(".").pop() || "" : "").toLowerCase().replace(/[^a-z0-9]/g, "").slice(0, 5) || defaultExt;
         const stored = await SubmissionHelper.storeInline(this.repos, submission, asset, `${field}.${ext}`, file.contentType, Buffer.from(file.base64, "base64"), au.id);
-        if (stored.ok === false) return this.json({ errors: stored.errors || [stored.error] }, stored.status);
+        if (stored.ok === false) {
+          await PublishHelper.discardProposed(this.repos, submission, asset, true);
+          return this.json({ errors: stored.errors || [stored.error] }, stored.status);
+        }
       }
       const result = await SubmissionHelper.submit(this.repos, submission, asset);
       if (result.ok === false) {
-        await this.repos.submission.delete(submission.id || "");
-        await this.repos.assetFile.deleteBySubmission(submission.id || "");
-        await this.repos.asset.delete(asset.id || "");
+        await PublishHelper.discardProposed(this.repos, submission, asset, true);
         const errors = result.errors || [result.error];
         return this.json({ errors }, result.status);
       }

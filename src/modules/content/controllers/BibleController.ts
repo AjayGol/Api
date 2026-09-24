@@ -4,6 +4,7 @@ import { ContentBaseController } from "./ContentBaseController.js";
 import { BibleSourceFactory } from "../helpers/BibleSourceFactory.js";
 import { Permissions } from "../helpers/index.js";
 import { BibleTranslation, BibleVerseText } from "../models/index.js";
+import { BibleVerseTextRepo } from "../repositories/BibleVerseTextRepo.js";
 
 @controller("/content/bibles")
 export class BibleController extends ContentBaseController {
@@ -28,7 +29,9 @@ export class BibleController extends ContentBaseController {
 
   @httpGet("/stats")
   public async getStats(req: express.Request<{}, {}, null>, res: express.Response): Promise<any> {
-    return this.actionWrapperAnon(req, res, async () => {
+    return this.actionWrapper(req, res, async (au) => {
+      if (!au.checkAccess(Permissions.server.admin)) return this.json({}, 401);
+      if (!req.query.startDate || !req.query.endDate) return this.json({ error: "startDate and endDate are required" }, 400);
       const startDate = new Date(req.query.startDate.toString());
       const endDate = new Date(req.query.endDate.toString());
       const result = await this.repos.bibleLookup.getStats(startDate, endDate);
@@ -125,10 +128,10 @@ export class BibleController extends ContentBaseController {
       const canCache = !this.noCache.includes(sourceKey);
       let result: BibleVerseText[] = [];
       const ipAddress = (req.headers["x-forwarded-for"] || req.socket.remoteAddress).toString().split(",")[0];
-      this.logLookup(ipAddress, sourceKey, startVerseKey, endVerseKey);
+      this.logLookup(ipAddress, sourceKey, startVerseKey, endVerseKey).catch((e) => console.error("Failed to log bible lookup", e));
 
       if (canCache) result = await this.repos.bibleVerseText.loadRange(sourceKey, startVerseKey, endVerseKey);
-      if (result.length === 0) {
+      if (!BibleVerseTextRepo.coversRange(result, startVerseKey, endVerseKey)) {
         result = await BibleSourceFactory.getVerseText(source, sourceKey, startVerseKey, endVerseKey);
         if (canCache) {
           result.forEach((r: BibleVerseText) => {

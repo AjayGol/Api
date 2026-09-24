@@ -8,30 +8,16 @@ import { SecurityCodeHelper, CheckinGateHelper } from "../helpers/index.js";
 import type { GateGroup, GateCount, GateIncoming } from "../helpers/CheckinGateHelper.js";
 import { getMembershipModuleGateway } from "../../../shared/modules/index.js";
 
-interface IdCache {
-  [name: string]: string;
-}
-
 @controller("/attendance/visits")
 export class VisitController extends AttendanceBaseController {
-  static cachedSessionIds: IdCache = {};
-
   private async getSessionId(churchId: string, serviceTimeId: string, groupId: string, currentDate: Date) {
-    let result = "";
-    const key = currentDate.toDateString() + "_" + serviceTimeId.toString() + "_" + groupId.toString();
-    const cached: string = VisitController.cachedSessionIds[key];
-    if (cached !== undefined) result = cached;
-    else {
-      let session: Session = await this.repos.session.loadByGroupServiceTimeDate(churchId, groupId, serviceTimeId, currentDate);
-      if (session === null) {
-        session = { churchId, groupId, serviceTimeId, sessionDate: currentDate };
-        session = await this.repos.session.save(session);
-        await WebhookDispatcher.emit(churchId, "session.created", session);
-      }
-      VisitController.cachedSessionIds[key] = session.id;
-      result = session.id;
+    let session: Session = await this.repos.session.loadByGroupServiceTimeDate(churchId, groupId, serviceTimeId, currentDate);
+    if (session === null) {
+      session = { churchId, groupId, serviceTimeId, sessionDate: currentDate };
+      session = await this.repos.session.save(session);
+      await WebhookDispatcher.emit(churchId, "session.created", session);
     }
-    return result;
+    return session.id;
   }
 
   @httpGet("/checkin")
@@ -40,6 +26,7 @@ export class VisitController extends AttendanceBaseController {
       if (!au.checkAccess(Permissions.attendance.view) && !au.checkAccess(Permissions.attendance.checkin) && !au.personId) return this.json({}, 401);
       else {
         const result: Visit[] = [];
+        if (!req.query.serviceId || !req.query.peopleIds) return this.json({ error: "serviceId and peopleIds are required" }, 400);
         const serviceId = req.query.serviceId.toString();
         const peopleIdList = req.query.peopleIds.toString().split(",");
         const currentDate = new Date();
@@ -77,16 +64,14 @@ export class VisitController extends AttendanceBaseController {
             });
           }
 
-          // If previous week, make a copy (remove the ids)
+          // Ids are always dropped (postCheckin replaces today's rows); only today's visits keep their security code.
           visits?.forEach((v) => {
-            if (v.visitDate !== currentDate) {
-              v.id = null;
-              v.securityCode = null;
-              v.visitSessions?.forEach((vs) => {
-                vs.visitId = null;
-                vs.id = null;
-              });
-            }
+            if (new Date(v.visitDate).toDateString() !== currentDate.toDateString()) v.securityCode = null;
+            v.id = null;
+            v.visitSessions?.forEach((vs) => {
+              vs.visitId = null;
+              vs.id = null;
+            });
           });
         }
 
@@ -103,6 +88,7 @@ export class VisitController extends AttendanceBaseController {
         const currentDate = new Date();
         currentDate.setHours(0, 0, 0, 0);
 
+        if (!req.query.serviceId || !req.query.peopleIds || !Array.isArray(req.body)) return this.json({ error: "serviceId, peopleIds and a visit list are required" }, 400);
         const serviceId = req.query.serviceId.toString();
         const peopleIdList = req.query.peopleIds.toString().split(",");
         const peopleIds: string[] = [];
@@ -125,7 +111,9 @@ export class VisitController extends AttendanceBaseController {
 
         const submittedVisits = [...req.body];
         // Re-check-ins keep their existing code; a fresh one would be returned to the client without ever being saved.
-        let securityCode = submittedVisits.find((sv) => sv.securityCode)?.securityCode || "";
+        // Only a code this batch's people already hold today is kept; anything else from the client is replaced.
+        const existingCodes = new Set(existingVisits.map((v) => v.securityCode).filter(Boolean));
+        let securityCode = submittedVisits.find((sv) => sv.securityCode && existingCodes.has(sv.securityCode))?.securityCode || "";
         if (!securityCode) {
           for (let attempt = 0; attempt < 5; attempt++) {
             securityCode = SecurityCodeHelper.generate();
@@ -139,11 +127,14 @@ export class VisitController extends AttendanceBaseController {
           sv.visitDate = currentDate;
           sv.checkinTime = new Date();
           sv.addedBy = au.id;
-          if (!sv.securityCode) sv.securityCode = securityCode;
+          // Today's rows are deleted and re-inserted below, so client-supplied ids could only target other rows.
+          sv.id = null;
+          if (!existingCodes.has(sv.securityCode)) sv.securityCode = securityCode;
           // for..of, not forEach(async): unawaited assignments raced the save and wrote NULL sessionIds on first-session creation
           for (const vs of sv.visitSessions) {
             vs.sessionId = await this.getSessionId(au.churchId, vs.session.serviceTimeId, vs.session.groupId, currentDate);
             vs.churchId = au.churchId;
+            vs.id = null;
           }
         }
 

@@ -41,6 +41,7 @@ export class MessageController extends MessagingBaseController {
         const convData = await this.repos.conversation.loadById(message.churchId, message.conversationId);
         const conv = convData ? this.repos.conversation.convertToModel(convData) : null;
         if (!conv?.id || conv.allowAnonymousPosts !== true || !this.isAnonPublicConversation(conv) || this.isPersonNote(conv.contentType)) return this.json({ error: "Anonymous posting not allowed" }, 401);
+        message.id = undefined;
         message.personId = null;
         message.churchId = conv.churchId;
       }
@@ -147,13 +148,15 @@ export class MessageController extends MessagingBaseController {
           const isOwner = !!existing?.personId && existing.personId === au.personId;
           if (!isOwner && !au.checkAccess(Permissions.content.edit)) return this.json({}, 401);
           message.personId = existing?.personId ?? null;
+          message.displayName = existing?.displayName;
         }
       }
       const promises: Promise<Message>[] = [];
       req.body.forEach((message) => {
         message.churchId = au.churchId;
         if (!message.personId && au?.personId) message.personId = au.personId;
-        if (!message.displayName && au?.firstName) message.displayName = au.firstName + " " + au.lastName;
+        if (!message.id) message.displayName = [au?.firstName, au?.lastName].filter(Boolean).join(" ") || message.displayName;
+        const shouldNotify = !message.id && message.messageType !== "subscription";
         promises.push(
           this.repos.message.save(message).then(async (savedMessage) => {
             console.info("[chat-push] message saved", {
@@ -189,7 +192,7 @@ export class MessageController extends MessagingBaseController {
                 action: "conversationActivity",
                 data: { contentType: conv.contentType, contentId: conv.contentId, conversationId: conv.id, kind: "message" }
               }) : Promise.resolve(),
-              NotificationHelper.checkShouldNotify(conv, savedMessage, savedMessage.personId || "anonymous")
+              shouldNotify ? NotificationHelper.checkShouldNotify(conv, savedMessage, savedMessage.personId || "anonymous") : Promise.resolve()
             ]);
 
             return savedMessage;
@@ -285,6 +288,7 @@ export class MessageController extends MessagingBaseController {
         return this.json({ error: "Unauthorized" }, 401);
       }
       await this.repos.message.delete(au.churchId, id);
+      await this.repos.conversation.updateStats(message.conversationId);
 
       // Send real-time delete notification
       (await DeliveryHelper.sendConversationMessages({

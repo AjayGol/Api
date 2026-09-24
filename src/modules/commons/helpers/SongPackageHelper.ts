@@ -10,6 +10,37 @@ import { RightsHelper } from "./RightsHelper.js";
 const CHORD = /\[[A-G][#b]?[^\]]*\]/;
 const RIGHTS_LAYERS = ["text", "translation", "tune", "arrangement", "recording", "artwork"] as const;
 const SIMILAR_LIMIT = 6;
+const LIST_AUDIO = /\.(mp3|m4a|wav|ogg|flac)(\?|#|$)/i;
+const LIST_STEMS_ZIP = /\/output\/audio\/[^/?#]+\.zip(\?|#|$)/i;
+const LIST_PACKAGE = /\/commons\/(songs\/[^/]+\/[^/]+)\//;
+const LIST_FIELDS = [
+  "id",
+  "title",
+  "writer",
+  "year",
+  "themes",
+  "language",
+  "license",
+  "downloadCount",
+  "saveCount",
+  "createdAt",
+  "publishedAt",
+  "songKey",
+  "bpm",
+  "meter",
+  "scripture",
+  "hymnalCount",
+  "parentSongId",
+  "firstLine",
+  "tune",
+  "confidence",
+  "sundayReady",
+  "hasChords",
+  "hasScore",
+  "hasSlides",
+  "hasAccompaniment",
+  "rank"
+] as const;
 
 export interface SongSummary extends SongView {
   confidence: Confidence | null;
@@ -26,6 +57,16 @@ export interface SongSummary extends SongView {
   recommendedKey: string | null;
   singTimeSeconds: number | null;
   fileUrls: Record<string, string>;
+  /** List only: commons-relative package directory, when this song has its own files. */
+  packageDir?: string;
+  hasCover?: boolean;
+  hasMidi?: boolean;
+  hasDemo?: boolean;
+  hasStems?: boolean;
+  coverOnParent?: boolean;
+  midiOnParent?: boolean;
+  /** List only: writers/.../portrait.jpg, relative to the content root. */
+  portrait?: string;
 }
 
 export interface SongDetail extends Omit<SongSummary, "rights" | "form" | "publishedKeys" | "listenedKeys" | "sundayReadyAt" | "contributors"> {
@@ -67,13 +108,17 @@ export class SongPackageHelper {
     return { status: "draft", sections: labels.map((label, i) => ({ label, lyric: i + 1 })), defaultOrder: labels };
   }
 
-  /** The tier a package earns from its files alone; "sunday-ready" is only ever granted by the listen gate. */
+  /** Stored rows may still say proofread-score / converted-from-abc until the remap migration runs. */
+  static normalizeConfidence(c?: string | null): Confidence | null {
+    if (!c) return null;
+    if (c === "proofread-score" || c === "converted-from-abc") return "score";
+    return c as Confidence;
+  }
+
+  /** The tier a package earns from its files alone; "sunday-ready" is only ever granted by the listen gate.
+   *  ABC conversion is a typeset score (Open Hymnal SATB), same as an uploaded MusicXML master. MIDI is the sketch. */
   static baseConfidence(p: { hasScore: boolean; scoreSource?: string | null; hasChords: boolean }): Confidence {
-    if (p.hasScore) {
-      if (p.scoreSource === "master") return "proofread-score";
-      if (p.scoreSource === "midi") return "generated-from-midi";
-      return "converted-from-abc";
-    }
+    if (p.hasScore) return p.scoreSource === "midi" ? "generated-from-midi" : "score";
     return p.hasChords ? "chart-only" : "lyrics-only";
   }
 
@@ -99,24 +144,62 @@ export class SongPackageHelper {
 
   /** Summary row: the joined row with the new booleans, reviewer-only fields dropped, has* read off the served files. */
   static summary(row: SongView, fileUrls: Record<string, string>): SongSummary {
-    const { portraitKey: _portraitKey, qualityScore: _qualityScore, ...rest } = row as SongView & { portraitKey?: string };
+    const { portraitKey: _portraitKey, qualityScore: _qualityScore, ratingCount: _ratingCount, ratingSum: _ratingSum, ...rest } = row as SongView & { portraitKey?: string };
+    const confidence = this.normalizeConfidence(row.confidence);
     return {
       ...rest,
-      confidence: (row.confidence as Confidence) || null,
-      sundayReady: row.confidence === "sunday-ready",
+      confidence,
+      sundayReady: confidence === "sunday-ready",
       featured: !!row.featured,
       firstLine: row.firstLine || null,
       tune: row.tune || null,
       hymnalCount: row.hymnalCount || 0,
       hasChords: !!row.hasChords,
-      hasScore: !!fileUrls.score,
+      // Open Hymnal ABC is a typeset SATB score; generated MusicXML is often gitignored and never lands in fileUrls
+      hasScore: !!(fileUrls.score || fileUrls.abc),
       hasSlides: !!fileUrls.slides,
       hasTiming: !!fileUrls.timing,
-      hasAccompaniment: false, // demoAudio is a writer demo, not accompaniment; no rendered accompaniment exists yet
+      hasAccompaniment: !!(fileUrls.instrumental || fileUrls.stemsZip),
       recommendedKey: row.recommendedKey || null,
       singTimeSeconds: row.singTimeSeconds ?? null,
       fileUrls
     };
+  }
+
+  // GET /songs is one row per published song. Cover, thumbnail, melody, and demo
+  // sit at fixed names inside a package directory. The directory is not always
+  // slug(title), and a translation often uses its parent's. The row carries the
+  // directory plus booleans. Charts, scores, and the stems filename stay on the song page.
+  static listRow(row: SongSummary): SongSummary {
+    const out: Partial<SongSummary> = {};
+    for (const key of LIST_FIELDS) {
+      const value = row[key];
+      if (value !== undefined && value !== null && value !== "") out[key] = value as never;
+    }
+    const files = row.fileUrls || {};
+    const ownId = row.id || "";
+    const dirOf = (url?: string) => (url && url.match(LIST_PACKAGE)?.[1]) || "";
+    const owns = (dir: string) => !!ownId && dir.endsWith(`-${ownId}`);
+    const coverDir = dirOf(files.cover || files.art || files.thumb);
+    const midiDir = dirOf(files.midi);
+    const demoUrl = files.demoAudio || files.master || (LIST_AUDIO.test(files.song || "") ? files.song : "");
+    const demoDir = dirOf(demoUrl);
+    const ownDir = [coverDir, midiDir, demoDir].find(owns) || "";
+    if (ownDir) out.packageDir = ownDir;
+    if (coverDir) {
+      out.hasCover = true;
+      if (!owns(coverDir)) out.coverOnParent = true;
+    }
+    if (midiDir) {
+      out.hasMidi = true;
+      if (!owns(midiDir)) out.midiOnParent = true;
+    }
+    if (demoDir) out.hasDemo = true;
+    if (Object.entries(files).some(([key, url]) => key === "stemsZip" || LIST_STEMS_ZIP.test(url || ""))) out.hasStems = true;
+    const portrait = files.portrait || "";
+    const writersAt = portrait.indexOf("writers/");
+    if (writersAt >= 0) out.portrait = portrait.slice(writersAt);
+    return out as SongSummary;
   }
 
   /** Detail row: summary plus the parsed rights/form/keys, the computed matrix, and the attribution text. */

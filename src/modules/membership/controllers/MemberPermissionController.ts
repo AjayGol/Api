@@ -8,7 +8,7 @@ export class MemberPermissionController extends MembershipBaseController {
   @httpGet("/:id")
   public async get(@requestParam("id") id: string, req: express.Request<{}, {}, null>, res: express.Response): Promise<any> {
     return this.actionWrapper(req, res, async (au) => {
-      if (!this.formAccess(au, id, "view")) return this.json({}, 401);
+      if (!(await this.formAccess(au, id, "view"))) return this.json({}, 401);
       else return this.repos.memberPermission.convertToModel(au.churchId, await this.repos.memberPermission.load(au.churchId, id));
     });
   }
@@ -16,7 +16,7 @@ export class MemberPermissionController extends MembershipBaseController {
   @httpGet("/member/:id")
   public async getByMember(@requestParam("id") id: string, req: express.Request<{}, {}, null>, res: express.Response): Promise<any> {
     return this.actionWrapper(req, res, async (au) => {
-      if (!this.formAccess(au, id)) return this.json({}, 401);
+      if (id !== au.personId && !(await this.formAccess(au, id))) return this.json({}, 401);
       else return this.repos.memberPermission.convertAllToModel(au.churchId, (await this.repos.memberPermission.loadFormsByPerson(au.churchId, id)) as any[]);
     });
   }
@@ -24,19 +24,17 @@ export class MemberPermissionController extends MembershipBaseController {
   @httpGet("/form/:id")
   public async getByForm(@requestParam("id") id: string, req: express.Request<{}, {}, null>, res: express.Response): Promise<any> {
     return this.actionWrapper(req, res, async (au) => {
-      if (!this.formAccess(au, id)) return this.json({}, 401);
+      if (!(await this.formAccess(au, id))) return this.json({}, 401);
       else return this.repos.memberPermission.convertAllToModel(au.churchId, (await this.repos.memberPermission.loadPeopleByForm(au.churchId, id)) as any[]);
     });
   }
 
+  // authz-exempt: returns only the caller's own permission row (scoped to au.churchId + au.personId)
   @httpGet("/form/:id/my")
   public async getMyPermissions(@requestParam("id") id: string, req: express.Request<{}, {}, null>, res: express.Response): Promise<any> {
     return this.actionWrapper(req, res, async (au) => {
-      if (!this.formAccess(au, id)) return this.json({}, 401);
-      else {
-        const permission = await this.repos.memberPermission.loadMyByForm(au.churchId, id, au.personId);
-        return permission ? this.repos.memberPermission.convertToModel(au.churchId, permission) : null;
-      }
+      const permission = await this.repos.memberPermission.loadMyByForm(au.churchId, id, au.personId);
+      return permission ? this.repos.memberPermission.convertToModel(au.churchId, permission) : null;
     });
   }
 
@@ -46,6 +44,10 @@ export class MemberPermissionController extends MembershipBaseController {
     return this.actionWrapper(req, res, async (au) => {
       const promises: Promise<MemberPermission>[] = [];
       for (const memberPermission of req.body) {
+        if (memberPermission.id) {
+          const existing = await this.repos.memberPermission.load(au.churchId, memberPermission.id);
+          if (!existing || existing.contentId !== memberPermission.contentId) continue;
+        }
         if (await this.formAccess(au, memberPermission.contentId)) {
           memberPermission.churchId = au.churchId;
           promises.push(this.repos.memberPermission.save(memberPermission));
@@ -60,8 +62,9 @@ export class MemberPermissionController extends MembershipBaseController {
   @httpDelete("/:id")
   public async delete(@requestParam("id") id: string, req: express.Request<{}, {}, null>, res: express.Response): Promise<any> {
     return this.actionWrapper(req, res, async (au) => {
-      const formId = req?.query?.formId.toString();
-      if (!(await this.formAccess(au, formId))) return this.json({}, 401);
+      const formId = req?.query?.formId?.toString();
+      const existing = await this.repos.memberPermission.load(au.churchId, id);
+      if (!existing || !formId || existing.contentId !== formId || !(await this.formAccess(au, formId))) return this.json({}, 401);
       else {
         await this.repos.memberPermission.delete(au.churchId, id);
         return this.json({});
@@ -73,7 +76,7 @@ export class MemberPermissionController extends MembershipBaseController {
   @httpDelete("/member/:id")
   public async deleteByMemberId(@requestParam("id") id: string, req: express.Request<{}, {}, null>, res: express.Response): Promise<any> {
     return this.actionWrapper(req, res, async (au) => {
-      const formId = req?.query?.formId.toString();
+      const formId = req?.query?.formId?.toString();
       if (!formId || !(await this.formAccess(au, formId))) return this.json({}, 401);
       else {
         await this.repos.memberPermission.deleteByMemberId(au.churchId, id, formId);

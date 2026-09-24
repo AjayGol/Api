@@ -7,10 +7,10 @@ import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
 import { createPresignedPost } from "@aws-sdk/s3-presigned-post";
 import { Environment } from "../../../shared/helpers/Environment.js";
 import { AssetFile, SongView } from "../models/index.js";
-import { baseName, findByBase, isPackageKey, packageDirFrom, packageKey, packageRole } from "./PackageLayout.js";
+import { baseName, completedPackageName, findByBase, isPackageKey, packageDirFrom, packageKey, packageRole } from "./PackageLayout.js";
 
 // Storage keys are derived from assetFiles.name, never stored twice. A song file's name is its catalog key
-// (songs/<lang>/<section>/<slug>-<id>/{sources,masters,derivatives}/<file>, or works/… for an inherited file) and
+// (songs/<lang>/<section>/<slug>-<id>/{sources,masters,derivatives}/<file>; an inherited file is keyed under the parent song) and
 // lives at commons/<name> — the same path the content repo holds, so `sync pull` picks it up unchanged. Names
 // without that prefix (rows from before the cut-over, and every non-song asset) still resolve to the id-keyed
 // folder commons/assets/{assetType}/{assetId}/{name}. Proposed objects sit under commons/pending/{submissionId}/
@@ -21,7 +21,7 @@ const ROOT = "commons";
 const PENDING_ROOT = `${ROOT}/pending`;
 const REVIEW_TTL_SEC = 7200;
 const UPLOAD_TTL_SEC = 3600;
-export const UPLOAD_FIELDS = ["demoAudio", "sheetPdf", "stemsZip"] as const;
+export const UPLOAD_FIELDS = ["demoAudio", "sheetPdf", "stemsZip", "master"] as const;
 // when two files share a role the freshest wins: masters/lyrics.chordpro is rewritten on every publish while
 // derivatives/chart.chordpro waits for the pipeline (an uploaded art-thumb is renamed onto the generated thumb, so no rule)
 const PREFERRED = new Set(["lyrics.chordpro"]);
@@ -45,7 +45,8 @@ export class ContentLibraryHelper {
 
   /** Storage key of a live file: a catalog key sits directly under the commons prefix, anything else under the legacy folder. */
   static liveKey(asset: { assetType?: string; id?: string }, name: string): string {
-    return isPackageKey(name) ? `${ROOT}/${name}` : `${this.livePrefix(asset)}/${name}`;
+    const n = completedPackageName(name);
+    return isPackageKey(n) ? `${ROOT}/${n}` : `${this.livePrefix(asset)}/${n}`;
   }
 
   /** Storage key of the song package's own files: commons/songs/<lang>/<section>/<slug>-<id>. */
@@ -86,8 +87,9 @@ export class ContentLibraryHelper {
     const out: Record<string, string> = {};
     for (const f of files) {
       if (!f.name) continue;
-      const role = this.role(f.name);
-      if (!(role in out) || PREFERRED.has(baseName(f.name))) out[role] = this.publicUrl(this.liveKey(asset, f.name));
+      const name = completedPackageName(f.name);
+      const role = this.role(name);
+      if (!(role in out) || PREFERRED.has(baseName(name))) out[role] = this.publicUrl(this.liveKey(asset, name));
     }
     if (portraitKey) out.portrait = this.publicUrl(portraitKey);
     return out;
@@ -115,12 +117,16 @@ export class ContentLibraryHelper {
       license: song.license,
       licenseVersion: song.licenseVersion ?? undefined,
       licenseUrl: song.licenseUrl ?? undefined,
+      ccli: song.ccli ?? undefined,
       hymnalCount: song.hymnalCount ?? 0,
       status: SONG_JSON_STATUS[song.status || ""] || "approved",
       submittedBy: song.submittedBy,
       proAnswer: song.proAnswer,
       certified: true,
       confidence: song.confidence ?? undefined,
+      // a translation names its parent so the content-repo export keeps the family (tools/lib.mjs parentOf)
+      parent: song.parentSongId ? { id: song.parentSongId } : undefined,
+      relationLabel: song.relationLabel ?? undefined,
       rights: parseJson(song.rights),
       form: parseJson(song.form),
       publishedKeys: parseJson(song.publishedKeys),
@@ -157,7 +163,8 @@ export class ContentLibraryHelper {
   static async promote(fromKey: string, toKey: string): Promise<boolean> {
     const file = await this.readKey(fromKey);
     if (!file) return false;
-    await FileStorageHelper.store(toKey, file.contentType, file.buffer);
+    // The pending type came from the uploader; the public copy is served with the type its extension implies.
+    await FileStorageHelper.store(toKey, this.contentTypeFor(toKey), file.buffer);
     return true;
   }
 
@@ -276,6 +283,11 @@ export class ContentLibraryHelper {
       this.s3 = new S3Client(config);
     }
     return this.s3;
+  }
+
+  /** Keys under a live prefix (`commons/songs/…/output/audio`). */
+  static listLiveKeys(prefix: string): Promise<string[]> {
+    return this.listKeys(prefix);
   }
 
   // S3 lists every key under the prefix; the disk store only lists one directory, so walk the package folders ourselves

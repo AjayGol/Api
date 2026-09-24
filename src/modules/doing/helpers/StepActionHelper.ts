@@ -3,6 +3,7 @@ import { Repos } from "../repositories/index.js";
 import { Task, WorkflowStep, WorkflowStepAction } from "../models/index.js";
 import { getMembershipModuleGateway, getMessagingModuleGateway } from "../../../shared/modules/index.js";
 import { UrlValidator } from "../../../shared/webhooks/UrlValidator.js";
+import { SafeHttp } from "../../../shared/webhooks/SafeHttp.js";
 import { WorkflowHelper } from "./WorkflowHelper.js";
 
 interface HistoryEntry {
@@ -19,7 +20,7 @@ interface ActionCursor {
 // cursor so processSnoozed can resume the rest after the wait (drip support).
 export class StepActionHelper {
   // Returns true when parked (a delay); startIndex resumes after a wake.
-  public static async execute(task: Task, step: WorkflowStep, repos: Repos, startIndex = 0): Promise<boolean> {
+  public static async execute(task: Task, step: WorkflowStep, repos: Repos, startIndex = 0, depth = 0): Promise<boolean> {
     const actions = (await repos.workflowStepAction.loadForStep(task.churchId || "", step.id || "")) as WorkflowStepAction[];
     for (let i = startIndex; i < actions.length; i++) {
       const action = actions[i];
@@ -52,7 +53,7 @@ export class StepActionHelper {
             await this.removeFromGroup(task, config);
             break;
           case "addToWorkflow":
-            await this.addToWorkflow(task, config, repos);
+            await this.addToWorkflow(task, config, repos, depth);
             break;
           case "setField":
             await this.setField(task, config);
@@ -129,17 +130,13 @@ export class StepActionHelper {
       console.warn(`[StepActionHelper] webhook URL rejected (${error}): ${url}`);
       return;
     }
-    await fetch(url, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        cardId: task.id,
-        workflowId: task.workflowId,
-        stepId: task.stepId,
-        personId: task.associatedWithId,
-        personName: task.associatedWithLabel
-      })
-    });
+    await SafeHttp.post(url, { "Content-Type": "application/json" }, JSON.stringify({
+      cardId: task.id,
+      workflowId: task.workflowId,
+      stepId: task.stepId,
+      personId: task.associatedWithId,
+      personName: task.associatedWithLabel
+    }), 10000, 0);
     this.appendHistory(task, "Webhook sent");
   }
 
@@ -188,13 +185,13 @@ export class StepActionHelper {
       assignedToId: config.assignedToId,
       assignedToLabel: config.assignedToLabel,
       title: config.title,
-      status: "Pending",
+      status: "Open",
       data: config.description ? JSON.stringify({ description: config.description }) : undefined
     });
     this.appendHistory(task, `Task created: ${config.title}`);
   }
 
-  private static async addToWorkflow(task: Task, config: Record<string, any>, repos: Repos): Promise<void> {
+  private static async addToWorkflow(task: Task, config: Record<string, any>, repos: Repos, depth: number): Promise<void> {
     if (task.associatedWithType !== "person" || !task.associatedWithId || !config.workflowId) return;
     await WorkflowHelper.addToWorkflow(
       task.churchId || "",
@@ -203,7 +200,8 @@ export class StepActionHelper {
       { type: "system", label: "System" },
       undefined,
       repos,
-      config.stepId
+      config.stepId,
+      depth + 1
     );
     this.appendHistory(task, config.workflowLabel ? `Added to workflow: ${config.workflowLabel}` : "Added to workflow");
   }

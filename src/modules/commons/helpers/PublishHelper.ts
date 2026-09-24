@@ -9,6 +9,8 @@ import { DeclinedFile } from "./ReviewerHelper.js";
 import { normalizeTags } from "./SubmitValidation.js";
 
 const GENERIC_FIELDS = ["name", "description", "tags", "language", "license", "publisherChurchId"] as const;
+// publisherChurchId is fixed when the asset is created; a proposal can't move it to another church.
+const APPLIED_FIELDS = GENERIC_FIELDS.filter((k) => k !== "publisherChurchId");
 
 // ponytail: no DB transaction — every step is idempotent (copy overwrites, delete is best-effort,
 // the submission only flips to approved last), so a failed approve is simply retried.
@@ -18,7 +20,7 @@ export class PublishHelper {
     if (sub.type === "removal") return await this.approveRemoval(repos, sub, asset, reviewerId, note);
     const payload = sub.payload || {};
     const generic: Partial<Asset> = {};
-    for (const k of GENERIC_FIELDS) if (payload[k] !== undefined) (generic as any)[k] = payload[k];
+    for (const k of APPLIED_FIELDS) if (payload[k] !== undefined) (generic as any)[k] = payload[k];
     if (generic.tags !== undefined) generic.tags = normalizeTags(String(generic.tags));
     await repos.asset.update(asset.id || "", generic);
     Object.assign(asset, generic);
@@ -99,16 +101,18 @@ export class PublishHelper {
     await manifestHook.onPublish(ctx);
 
     const now = new Date();
-    await repos.asset.update(asset.id || "", { status: "published", publishedAt: asset.publishedAt || now, publishedSubmissionId: sub.id, unpublishedAt: null as any, removedReason: null as any });
+    // An unpublished asset stays down; putting it back up is the republish action, not a side effect of an edit.
+    if (asset.status === "unpublished") await repos.asset.update(asset.id || "", { publishedSubmissionId: sub.id });
+    else await repos.asset.update(asset.id || "", { status: "published", publishedAt: asset.publishedAt || now, publishedSubmissionId: sub.id, unpublishedAt: null as any, removedReason: null as any });
     await repos.submission.update(sub.id || "", { status: "approved", reviewedBy: reviewerId, reviewedAt: now, reviewNote: note || null as any, filesChanged });
     await ContentLibraryHelper.removePrefix(ContentLibraryHelper.pendingPrefix(sub.id || ""));
-    void CommonsMailHelper.notifyApproved(sub, asset.id || "", declined).catch((e) => console.error("[CommonsMailHelper] approved failed:", e));
+    await CommonsMailHelper.notifyApproved(sub, asset.id || "", declined).catch((e) => console.error("[CommonsMailHelper] approved failed:", e));
   }
 
   /** pending → draft with the reviewer's note; proposed files stay put so the submitter can keep working on the draft. */
   static async requestChanges(repos: Repos, sub: Submission, reviewerId: string, note: string): Promise<void> {
     await repos.submission.update(sub.id || "", { status: "draft", reviewedBy: reviewerId, reviewedAt: new Date(), reviewReason: "changes", reviewNote: note });
-    void CommonsMailHelper.notifyChangesRequested(sub, note).catch((e) => console.error("[CommonsMailHelper] changes requested failed:", e));
+    await CommonsMailHelper.notifyChangesRequested(sub, note).catch((e) => console.error("[CommonsMailHelper] changes requested failed:", e));
   }
 
   /** An approved removal request unpublishes the asset: files, satellite and history stay so a republish is one status flip. */
@@ -118,13 +122,13 @@ export class PublishHelper {
     await repos.submission.update(sub.id || "", { status: "approved", reviewedBy: reviewerId, reviewedAt: now, reviewNote: note || null as any, filesChanged: [] });
     await repos.assetFile.deleteBySubmission(sub.id || "");
     await ContentLibraryHelper.removePrefix(ContentLibraryHelper.pendingPrefix(sub.id || ""));
-    void CommonsMailHelper.notifyApproved(sub, asset.id || "").catch((e) => console.error("[CommonsMailHelper] approved failed:", e));
+    await CommonsMailHelper.notifyApproved(sub, asset.id || "").catch((e) => console.error("[CommonsMailHelper] approved failed:", e));
   }
 
   static async reject(repos: Repos, sub: Submission, asset: Asset | undefined, reviewerId: string, reason: string, note: string): Promise<void> {
     await repos.submission.update(sub.id || "", { status: "rejected", reviewedBy: reviewerId, reviewedAt: new Date(), reviewReason: reason, reviewNote: note });
     await this.discardProposed(repos, sub, asset);
-    void CommonsMailHelper.notifyRejected(sub, reason, note).catch((e) => console.error("[CommonsMailHelper] rejected failed:", e));
+    await CommonsMailHelper.notifyRejected(sub, reason, note).catch((e) => console.error("[CommonsMailHelper] rejected failed:", e));
   }
 
   /** Withdraw / delete: drops the proposed files and, when nothing was ever published, the asset itself. */
@@ -163,7 +167,7 @@ export class PublishHelper {
     const payload: SubmissionPayload = { name: asset.name, description: asset.description, tags: asset.tags, language: asset.language, license: asset.license, publisherChurchId: asset.publisherChurchId, detail: {} };
     if (asset.assetType === "song") {
       const s = await repos.song.loadById(asset.id || "");
-      if (s) payload.detail = { writer: s.writer, year: s.year, songKey: s.songKey, bpm: s.bpm, timeSignature: s.timeSignature, scripture: s.scripture, scriptureText: s.scriptureText, chordPro: s.chordPro, videoUrl: s.videoUrl, parentSongId: s.parentSongId, relationLabel: s.relationLabel, proAnswer: s.proAnswer, certified: true };
+      if (s) payload.detail = { writer: s.writer, year: s.year, songKey: s.songKey, bpm: s.bpm, timeSignature: s.timeSignature, scripture: s.scripture, scriptureText: s.scriptureText, chordPro: s.chordPro, videoUrl: s.videoUrl, parentSongId: s.parentSongId, relationLabel: s.relationLabel, proAnswer: s.proAnswer, ccli: s.ccli, certified: true };
     }
     return payload;
   }

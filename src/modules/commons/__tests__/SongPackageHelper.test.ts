@@ -32,11 +32,14 @@ describe("SongPackageHelper text readers", () => {
 
 describe("SongPackageHelper.baseConfidence", () => {
   it("follows the score source, then the chords", () => {
-    expect(SongPackageHelper.baseConfidence({ hasScore: true, scoreSource: "master", hasChords: true })).toBe("proofread-score");
-    expect(SongPackageHelper.baseConfidence({ hasScore: true, scoreSource: "abc", hasChords: false })).toBe("converted-from-abc");
+    expect(SongPackageHelper.baseConfidence({ hasScore: true, scoreSource: "master", hasChords: true })).toBe("score");
+    expect(SongPackageHelper.baseConfidence({ hasScore: true, scoreSource: "abc", hasChords: false })).toBe("score");
     expect(SongPackageHelper.baseConfidence({ hasScore: true, scoreSource: "midi", hasChords: false })).toBe("generated-from-midi");
     expect(SongPackageHelper.baseConfidence({ hasScore: false, scoreSource: "abc", hasChords: true })).toBe("chart-only");
     expect(SongPackageHelper.baseConfidence({ hasScore: false, hasChords: false })).toBe("lyrics-only");
+    expect(SongPackageHelper.normalizeConfidence("proofread-score")).toBe("score");
+    expect(SongPackageHelper.normalizeConfidence("converted-from-abc")).toBe("score");
+    expect(SongPackageHelper.normalizeConfidence("sunday-ready")).toBe("sunday-ready");
   });
 });
 
@@ -78,13 +81,89 @@ const row = (): any => ({
 });
 const URLS = { score: "u/score.musicxml", slides: "u/slides.json", timing: "u/timing.json", attribution: "u/attribution.txt" };
 
+const pack = (id: string, slug: string) => `https://content.churchapps.org/commons/songs/en/${slug}-${id}`;
+
+describe("SongPackageHelper.listRow", () => {
+  it("keeps library fields and replaces package URLs with a directory and booleans", () => {
+    const id = "song0000001";
+    const base = pack(id, "amazing-grace");
+    const full = SongPackageHelper.summary({
+      ...row(),
+      writerBio: "A paragraph copied onto every song by this writer.",
+      licenseUrl: "https://example.com/license",
+      timeSignature: "3/4",
+      relationLabel: "Translation"
+    }, {
+      chart: `${base}/output/composition/chart.chordpro`,
+      score: `${base}/output/composition/score.musicxml`,
+      attribution: `${base}/output/composition/attribution.txt`,
+      song: `${base}/song.json`,
+      thumb: `${base}/output/composition/cover-thumb.webp`,
+      cover: `${base}/sources/cover.webp`,
+      portrait: "https://content.churchapps.org/commons/writers/john-newton/portrait.jpg",
+      midi: `${base}/sources/tune.mid`,
+      demoAudio: `${base}/sources/master/song.mp3`,
+      "Amazing Grace-pack": `${base}/output/audio/Amazing-Grace.zip`
+    });
+    const list = SongPackageHelper.listRow(full);
+    expect(list).toMatchObject({
+      title: full.title,
+      firstLine: full.firstLine,
+      hasScore: true,
+      confidence: "score",
+      rank: 70,
+      packageDir: "songs/en/amazing-grace-song0000001",
+      hasCover: true,
+      hasMidi: true,
+      hasDemo: true,
+      hasStems: true,
+      portrait: "writers/john-newton/portrait.jpg"
+    });
+    expect(list).not.toHaveProperty("fileUrls");
+    expect(list).not.toHaveProperty("coverOnParent");
+    expect(list).not.toHaveProperty("writerBio");
+    expect(list).not.toHaveProperty("licenseUrl");
+    expect(list).not.toHaveProperty("timeSignature");
+    expect(list).not.toHaveProperty("recommendedKey");
+    expect(list).not.toHaveProperty("singTimeSeconds");
+    expect(list).not.toHaveProperty("tune");
+  });
+
+  it("points a borrowed cover at the parent and keeps this song's own melody directory", () => {
+    const child = "child0000001";
+    const parent = "song0000001";
+    const own = pack(child, "cariñoso-salvador");
+    const borrowed = pack(parent, "jesus-lover-of-my-soul");
+    const list = SongPackageHelper.listRow(SongPackageHelper.summary({ ...row(), id: child, parentSongId: parent }, {
+      cover: `${borrowed}/sources/cover.webp`,
+      thumb: `${borrowed}/output/composition/cover-thumb.webp`,
+      midi: `${own}/sources/tune.mid`
+    }));
+    expect(list).toMatchObject({
+      packageDir: "songs/en/cariñoso-salvador-child0000001",
+      hasCover: true,
+      coverOnParent: true,
+      hasMidi: true
+    });
+    expect(list).not.toHaveProperty("midiOnParent");
+    expect(list).not.toHaveProperty("fileUrls");
+  });
+});
+
 describe("SongPackageHelper.summary", () => {
   it("adds the contract booleans from the served files and drops the reviewer-only columns", () => {
     const s = SongPackageHelper.summary(row(), URLS);
-    expect(s).toMatchObject({ confidence: "converted-from-abc", sundayReady: false, featured: true, firstLine: "Amazing grace! how sweet the sound,", tune: null, hymnalCount: 1200, hasChords: true, hasScore: true, hasSlides: true, hasTiming: true, hasAccompaniment: false, recommendedKey: null, singTimeSeconds: 150, rank: 70 });
+    expect(s).toMatchObject({ confidence: "score", sundayReady: false, featured: true, firstLine: "Amazing grace! how sweet the sound,", tune: null, hymnalCount: 1200, hasChords: true, hasScore: true, hasSlides: true, hasTiming: true, hasAccompaniment: false, recommendedKey: null, singTimeSeconds: 150, rank: 70 });
     expect(s).not.toHaveProperty("qualityScore");
     expect(s).not.toHaveProperty("portraitKey");
+    expect(s).not.toHaveProperty("ratingCount");
+    expect(s).not.toHaveProperty("ratingSum");
     expect(SongPackageHelper.summary({ ...row(), confidence: "sunday-ready" }, {})).toMatchObject({ sundayReady: true, hasScore: false, hasSlides: false, hasTiming: false });
+    expect(SongPackageHelper.summary(row(), { ...URLS, instrumental: "u/instrumental.m4a" }).hasAccompaniment).toBe(true);
+    expect(SongPackageHelper.summary(row(), { ...URLS, stemsZip: "u/pack.zip" }).hasAccompaniment).toBe(true);
+    expect(SongPackageHelper.summary(row(), { ...URLS, demoAudio: "u/demo.mp3" }).hasAccompaniment).toBe(false);
+    expect(SongPackageHelper.summary(row(), { abc: "u/tune.abc", slides: "u/slides.json" })).toMatchObject({ hasScore: true, hasSlides: true });
+    expect(SongPackageHelper.summary(row(), { midi: "u/tune.mid", slides: "u/slides.json" }).hasScore).toBe(false);
   });
 });
 

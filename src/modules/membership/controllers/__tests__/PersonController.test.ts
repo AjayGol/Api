@@ -27,6 +27,7 @@ function personController(opts: any = {}) {
       save: jest.fn(async (p: any) => { if (!p.id) p.id = "genP"; return p; }),
       convertAllToModelWithPermissions: (_c: string, arr: any[]) => arr,
       convertToModelWithPermissions: (_c: string, data: any) => data,
+      convertToModel: (_c: string, data: any) => data,
       convertToPreferenceModel: (_c: string, data: any) => data,
       load: jest.fn(async () => opts.person ?? null),
       delete: jest.fn(),
@@ -88,9 +89,15 @@ describe("PersonController.save authorization", () => {
   });
 
   it("allows editSelf when body[0].id matches the caller's personId", async () => {
-    const { controller, repos } = personController({ access: ["peopleEditSelf"], personId: "p1" });
+    const { controller, repos } = personController({ access: ["peopleEditSelf"], personId: "p1", person: { id: "p1", membershipStatus: "Guest", householdId: "h1", householdRole: "Head" } });
     await (controller as any).save(saveReq([{ id: "p1" }]), {});
     expect(repos.person.save).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps membershipStatus and household when a member edits themselves", async () => {
+    const { controller, repos } = personController({ access: ["peopleEditSelf"], personId: "p1", person: { id: "p1", membershipStatus: "Guest", householdId: "h1", householdRole: "Head" } });
+    await (controller as any).save(saveReq([{ id: "p1", membershipStatus: "Staff", householdId: "victimHousehold", householdRole: "Spouse" }]), {});
+    expect(repos.person.save).toHaveBeenCalledWith(expect.objectContaining({ membershipStatus: "Guest", householdId: "h1", householdRole: "Head" }));
   });
 
   it("blocks editSelf when body[0].id does not match the caller's personId", async () => {
@@ -435,5 +442,60 @@ describe("PersonController.duplicates", () => {
     const { controller } = personController({ access: ["peopleView"], duplicates: [] });
     const result = await (controller as any).duplicates({ body: { email: "nobody@x.org" } }, {});
     expect(result).toEqual([]);
+  });
+});
+
+// The directory gate must honour the church's directoryVisibility tier, not a hardcoded
+// Member/Staff check (ChurchAppsSupport#1089).
+describe("PersonController directory visibility gate", () => {
+  function dirController(opts: any) {
+    const settings = opts.directoryVisibility ? [{ keyName: "directoryVisibility", value: opts.directoryVisibility }] : [];
+    const { controller, repos } = personController({ personId: "p1", access: [], membershipStatus: opts.membershipStatus, settings });
+    repos.person.loadAlphabetical = jest.fn(async () => [{ id: "p2", name: { display: "Donald Clark" }, membershipStatus: "Member" }]);
+    repos.person.loadMembersByVisibility = jest.fn(async () => [{ id: "p2", name: { display: "Donald Clark" }, membershipStatus: "Member" }]);
+    repos.person.convertAllToBasicModel = (_c: string, rows: any[]) => rows;
+    return { controller, repos };
+  }
+
+  it("lets a Regular Attendee load the directory list when the church allows Regular Attendees", async () => {
+    const { controller, repos } = dirController({ membershipStatus: "Regular Attendee", directoryVisibility: "Regular Attendees" });
+    const result: any = await (controller as any).getList({ query: {} }, {});
+    expect(result.status).not.toBe(401);
+    expect(repos.person.loadAlphabetical).toHaveBeenCalled();
+  });
+
+  it("lets a Visitor load the directory list when the church allows Everyone", async () => {
+    const { controller, repos } = dirController({ membershipStatus: "Visitor", directoryVisibility: "Everyone" });
+    const result: any = await (controller as any).getList({ query: {} }, {});
+    expect(result.status).not.toBe(401);
+    expect(repos.person.loadAlphabetical).toHaveBeenCalled();
+  });
+
+  it("lets a Regular Attendee load GET /people/directory/all when the church allows Regular Attendees", async () => {
+    const { controller, repos } = dirController({ membershipStatus: "Regular Attendee", directoryVisibility: "Regular Attendees" });
+    const result: any = await (controller as any).getDirectoryPeople("all", { query: {} }, {});
+    expect(result.status).not.toBe(401);
+    expect(repos.person.loadMembersByVisibility).toHaveBeenCalledWith("c1", "Regular Attendees");
+  });
+
+  it("still blocks a Regular Attendee when the church is set to Members", async () => {
+    const { controller, repos } = dirController({ membershipStatus: "Regular Attendee", directoryVisibility: "Members" });
+    const result: any = await (controller as any).getList({ query: {} }, {});
+    expect(result.status).toBe(401);
+    expect(repos.person.loadAlphabetical).not.toHaveBeenCalled();
+  });
+
+  it("still blocks a Visitor when the church has no directoryVisibility setting (defaults to Members)", async () => {
+    const { controller, repos } = dirController({ membershipStatus: "Visitor" });
+    const result: any = await (controller as any).getList({ query: {} }, {});
+    expect(result.status).toBe(401);
+    expect(repos.person.loadAlphabetical).not.toHaveBeenCalled();
+  });
+
+  it("still blocks a Member when the church is set to Staff only", async () => {
+    const { controller, repos } = dirController({ membershipStatus: "Member", directoryVisibility: "Staff" });
+    const result: any = await (controller as any).getList({ query: {} }, {});
+    expect(result.status).toBe(401);
+    expect(repos.person.loadAlphabetical).not.toHaveBeenCalled();
   });
 });

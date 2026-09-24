@@ -2,6 +2,7 @@ import { controller, httpGet, requestParam } from "inversify-express-utils";
 import express from "express";
 import * as path from "path";
 import * as fs from "fs";
+import crypto from "crypto";
 import { fileURLToPath } from "url";
 import { ContentBaseController } from "./ContentBaseController.js";
 import { Setting } from "../models/index.js";
@@ -64,15 +65,16 @@ export class PraiseChartsController extends ContentBaseController {
   }
 
   static async saveLocalFile(fileName: string, fileBuffer: any) {
-    const publicDownloadsDir = path.join(__dirname, "..", "public", "downloads", "praiseCharts");
+    const folder = crypto.randomUUID();
+    const publicDownloadsDir = path.join(__dirname, "..", "public", "downloads", "praiseCharts", folder);
     const filePath = path.join(publicDownloadsDir, fileName);
     fs.mkdirSync(publicDownloadsDir, { recursive: true });
     fs.writeFileSync(filePath, fileBuffer);
-    return `/public/downloads/praiseCharts/${fileName}`;
+    return `/public/downloads/praiseCharts/${folder}/${fileName}`;
   }
 
   static async saveS3File(fileName: string, mimeType: string, fileBuffer: any) {
-    const pathName = `/downloads/praiseCharts/${fileName}`;
+    const pathName = `/downloads/praiseCharts/${crypto.randomUUID()}/${fileName}`;
     await AwsHelper.S3Upload(pathName, mimeType, fileBuffer);
     return pathName;
   }
@@ -80,6 +82,7 @@ export class PraiseChartsController extends ContentBaseController {
   @httpGet("/download")
   public async download(req: express.Request<{}, {}, null>, res: express.Response): Promise<any> {
     return this.actionWrapper(req, res, async (au) => {
+      if (!req.query.skus || !req.query.keys) return this.json({ error: "skus and keys are required" }, 400);
       const settings: Setting[] = await this.repos.setting.loadUser(au.churchId, au.id);
       const token = settings.find((s) => s.keyName === "praiseChartsAccessToken")?.value;
       const secret = settings.find((s) => s.keyName === "praiseChartsAccessTokenSecret")?.value;
@@ -90,7 +93,7 @@ export class PraiseChartsController extends ContentBaseController {
         fileName = path.basename(req.query.file_name.toString()).replace(/\.\.+/g, ".");
       }
       let mimeType = "application/pdf";
-      const fileType = fileName.split(".")[1].toLowerCase();
+      const fileType = path.extname(fileName).substring(1).toLowerCase();
       switch (fileType) {
         case "zip": mimeType = "application/zip"; break;
       }

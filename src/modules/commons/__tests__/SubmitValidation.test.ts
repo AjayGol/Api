@@ -96,7 +96,7 @@ describe("proposal types", () => {
   });
 
   it("rejects an unknown type outright", () => {
-    expect(validateSubmission(song, { ...goodSong, type: "remix" }, [], [])).toEqual(["type must be one of: new, translation, arrangement, correction, additionalFile, removal"]);
+    expect(validateSubmission(song, { ...goodSong, type: "remix" }, [], [])).toEqual(["type must be one of: new, translation, arrangement, correction, additionalFile, recording, removal"]);
   });
 
   it("new song: happy path, and refused against a published asset", () => {
@@ -131,6 +131,19 @@ describe("proposal types", () => {
     expect(validateSubmission(song, { ...goodSong, type: "correction" }, [], [], { isNewAsset: false, note: "typo" })).toEqual(["A note of at least 10 characters is required: say what changed and why"]);
     expect(validateSubmission(song, { ...goodSong, type: "correction" }, [], [], { isNewAsset: false })).toEqual(["A note of at least 10 characters is required: say what changed and why"]);
     expect(validateSubmission(song, { ...goodSong, type: "correction" }, [], [], { isNewAsset: true, note: published.note })).toEqual(["a correction proposal changes a published song; this song is not published yet"]);
+  });
+
+  it("a contributor's proposal can't relicense the song or replace a master's license; the publisher can", () => {
+    const live = { ...goodSong, license: "PD", detail: { ...goodSong.detail, masterLicense: "WC" } };
+    const same = { ...live, type: "correction" };
+    expect(validateSubmission(song, same, [], [], { ...published, livePayload: live })).toEqual([]);
+    expect(validateSubmission(song, { ...same, license: "WC" }, [], [], { ...published, livePayload: live })).toEqual(["Only the writer can change a song's license"]);
+    expect(validateSubmission(song, { ...same, detail: { ...same.detail, masterLicense: "PD" } }, [], [], { ...published, livePayload: live })).toEqual(["Only the writer can change the master recording's license"]);
+    expect(validateSubmission(song, { ...same, license: "WC" }, [], [], { ...published, livePayload: live, byPublisher: true })).toEqual([]);
+    // a first master on a song that has none names its own license
+    const noMaster = { ...goodSong, license: "PD" };
+    const rec = { ...noMaster, type: "recording", detail: { ...noMaster.detail, masterLicense: "CC-BY", recordingOwned: true } };
+    expect(validateSubmission(song, rec, [file("master.wav")], [], { ...published, livePayload: noMaster })).not.toContain("Only the writer can change the master recording's license");
   });
 
   it("additionalFile: note plus at least one added file", () => {
@@ -169,6 +182,14 @@ describe("ChordPro bracket lint", () => {
     expect(lintChordProBrackets("[[G]]")).toEqual(["Unmatched bracket on line 1 — every [ needs a closing ]"]);
     expect(lintChordProBrackets("")).toEqual([]);
     expect(validateSubmission(song, { ...goodSong, detail: { ...goodSong.detail, chordPro: "Verse 1\n[G Sing" } }, [], [])).toEqual(["Unmatched bracket on line 2 — every [ needs a closing ]"]);
+  });
+
+  it("accepts an optional 4–8 digit CCLI number and rejects anything else", () => {
+    expect(validateSubmission(song, { ...goodSong, detail: { ...goodSong.detail, ccli: "22025" } }, [], [])).toEqual([]);
+    expect(validateSubmission(song, { ...goodSong, detail: { ...goodSong.detail, ccli: "1156" } }, [], [])).toEqual([]);
+    expect(validateSubmission(song, { ...goodSong, detail: { ...goodSong.detail, ccli: "" } }, [], [])).toEqual([]);
+    expect(validateSubmission(song, { ...goodSong, detail: { ...goodSong.detail, ccli: "abc" } }, [], [])).toEqual(["CCLI number must be 4–8 digits"]);
+    expect(validateSubmission(song, { ...goodSong, detail: { ...goodSong.detail, ccli: "12" } }, [], [])).toEqual(["CCLI number must be 4–8 digits"]);
   });
 });
 

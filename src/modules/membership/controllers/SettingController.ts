@@ -84,14 +84,14 @@ export class MembershipSettingController extends MembershipBaseController {
   }
 
   private async saveSetting(setting: Setting) {
-    if (setting.value.startsWith("data:image/")) setting = await this.saveImage(setting);
+    if (setting.value?.startsWith("data:image/")) setting = await this.saveImage(setting);
     setting = await this.repos.setting.save(setting);
     return setting;
   }
 
   private async saveImage(setting: Setting) {
     const base64 = setting.value.split(",")[1];
-    const key = "/" + setting.churchId + "/settings/" + setting.keyName + ".png";
+    const key = "/" + setting.churchId + "/settings/" + (setting.keyName || "").replace(/[^A-Za-z0-9_-]/g, "") + ".png";
     await FileStorageHelper.store(key, "image/png", Buffer.from(base64, "base64"));
     const photoUpdated = new Date();
     setting.value = Environment.contentRoot + key + "?dt=" + photoUpdated.getTime().toString();

@@ -5,10 +5,20 @@ import { baseName } from "./PackageLayout.js";
 export const INLINE_MAX_BYTES = 1048576;
 export const DEFAULT_MAX_FILE_BYTES = 26214400;
 export const MAX_PENDING_PER_USER = 5;
-export const MAX_SUBMITTED_PER_DAY = 20;
+export const DEFAULT_SONG_LIMIT = 20;
 export const MIN_NOTE_LENGTH = 10;
 
-export const SUBMISSION_TYPES = ["new", "translation", "arrangement", "correction", "additionalFile", "removal"] as const;
+/** Lifetime new-song cap for a user: COMMONS_SONG_LIMITS override, else the default. Raise by editing the env; 0 bans. */
+export function songLimitFor(userId: string, overrides: string): number {
+  // ponytail: env list, same shape as COMMONS_MUSIC_EDITORS — a per-user table when the list passes ~20 entries
+  for (const entry of overrides.split(",")) {
+    const [id, n] = entry.split(":").map((s) => s.trim());
+    if (id === userId && n !== undefined && /^\d+$/.test(n)) return Number(n);
+  }
+  return DEFAULT_SONG_LIMIT;
+}
+
+export const SUBMISSION_TYPES = ["new", "translation", "arrangement", "correction", "additionalFile", "recording", "removal"] as const;
 export type SubmissionType = (typeof SUBMISSION_TYPES)[number];
 /** Types that create a package; the rest change a published one. */
 export const NEW_PACKAGE_TYPES: readonly string[] = ["new", "translation", "arrangement"];
@@ -18,6 +28,7 @@ export const SUBMISSION_TYPE_LABELS: Record<SubmissionType, string> = {
   arrangement: "arrangement",
   correction: "correction",
   additionalFile: "additional file",
+  recording: "master recording",
   removal: "removal request"
 };
 
@@ -106,8 +117,10 @@ export interface ValidationContext {
   isNewAsset?: boolean;
   /** the parent song named by detail.parentSongId; null when it does not exist; undefined when not looked up */
   parent?: { status?: string; language?: string } | null;
-  /** the published snapshot, so a removal can be checked for stray field changes */
+  /** the published snapshot, so a removal can be checked for stray field changes and a proposal for a relicense */
   livePayload?: SubmissionPayload;
+  /** true when the proposer is the song's own publisher — the only one who may change its license */
+  byPublisher?: boolean;
 }
 
 /** Returns every blocking problem with a submission; empty means it is acceptable. */
@@ -131,6 +144,7 @@ export function validateSubmission(def: AssetTypeDefinition, payload: Submission
   }
   // ponytail: lints the pasted ChordPro only; an uploaded lyrics.cho is linted when a reviewer opens it
   if (typeof detail.chordPro === "string") errors.push(...lintChordProBrackets(detail.chordPro));
+  if (detail.ccli != null && detail.ccli !== "" && !/^\d{4,8}$/.test(String(detail.ccli))) errors.push("CCLI number must be 4–8 digits");
 
   for (const f of proposed) {
     const name = f.name || "";
@@ -151,6 +165,9 @@ export function validateSubmission(def: AssetTypeDefinition, payload: Submission
   let total = 0;
   for (const n of resulting) total += liveSizes.get(n) || 0;
   if (total > def.maxTotalBytes) errors.push(`all files together exceed the ${Math.round(def.maxTotalBytes / 1048576)}MB limit`);
+
+  // a master recording is its own rights layer: it needs a license from the uploadable set, which may differ from the composition's
+  if (roles.has("master") && !def.licenses.includes(detail.masterLicense)) errors.push(`masterLicense must be one of: ${def.licenses.join(", ")}`);
 
   for (const att of def.attestations || []) {
     const required = !att.requiredWhenRole || proposed.some((f) => f.action !== "remove" && fileRole(f.name || "") === att.requiredWhenRole);
@@ -180,9 +197,19 @@ function validateProposalType(type: string, payload: SubmissionPayload, proposed
       else if (type === "translation" && ctx.parent.language && (payload.language || "English") === ctx.parent.language) errors.push(`A translation must be in a different language from the original (${ctx.parent.language})`);
     }
   }
-  if (type === "correction" || type === "additionalFile") {
+  if (type === "correction" || type === "additionalFile" || type === "recording") {
     if (text(ctx.note).length < MIN_NOTE_LENGTH) errors.push(`A note of at least ${MIN_NOTE_LENGTH} characters is required: say what changed and why`);
     if (type === "additionalFile" && !proposed.some((f) => f.action !== "remove")) errors.push("An additionalFile proposal must add a file");
+    if (type === "recording" && !proposed.some((f) => f.action !== "remove" && fileRole(f.name || "") === "master")) errors.push("A recording proposal must add a master file");
+    // a grant is the writer's to make: a contributor's proposal carries the song's license through unchanged
+    const live = ctx.livePayload;
+    if (live && !ctx.byPublisher) {
+      if ((payload.license || "") !== (live.license || "")) errors.push("Only the writer can change a song's license");
+      // a recording proposal names the license of the master it adds; it may not replace one already granted
+      const liveMaster = live.detail?.masterLicense;
+      const masterMayChange = type === "recording" && !liveMaster;
+      if (!masterMayChange && (detail.masterLicense || "") !== (liveMaster || "")) errors.push("Only the writer can change the master recording's license");
+    }
   }
   return errors;
 }

@@ -39,7 +39,7 @@ export class ListController extends MembershipBaseController {
     return this.actionWrapper(req, res, async (au) => {
       if (!au.checkAccess(Permissions.people.view)) return this.json({}, 401);
       if (!req.body?.rules) return this.json({ error: "rules is required" }, 400);
-      const personIds = await ListRuleHelper.evaluate(au.churchId, req.body.rules, req.body.householdInclusion, this.repos);
+      const personIds = await ListRuleHelper.evaluate(au.churchId, req.body.rules, req.body.householdInclusion, this.repos, undefined, au.personId);
       const data = await this.repos.person.loadByIds(au.churchId, personIds);
       return this.repos.person.convertAllToModelWithPermissions(au.churchId, data as any[], au.checkAccess(Permissions.people.edit));
     });
@@ -57,7 +57,6 @@ export class ListController extends MembershipBaseController {
   public async save(req: express.Request<{}, {}, List[]>, res: express.Response): Promise<any> {
     return this.actionWrapper(req, res, async (au) => {
       if (!au.checkAccess(Permissions.people.edit)) return this.json({}, 401);
-      const promises: Promise<List>[] = [];
       for (const list of req.body) {
         list.churchId = au.churchId;
         if (!list.id) list.createdByPersonId = au.personId;
@@ -66,9 +65,8 @@ export class ListController extends MembershipBaseController {
           if (!existing || !this.canView(existing, au.personId)) return this.json({ error: "Not found" }, 404);
           list.createdByPersonId = existing.createdByPersonId;
         }
-        promises.push(this.repos.list.save(list));
       }
-      return await Promise.all(promises);
+      return await Promise.all(req.body.map((list) => this.repos.list.save(list)));
     });
   }
 

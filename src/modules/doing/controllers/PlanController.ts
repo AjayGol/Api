@@ -161,24 +161,27 @@ export class PlanController extends DoingBaseController {
       if (oldId) planItemIdMap.set(oldId, savedItem.id || "");
     }
 
-    // Second pass: save child items with updated parentId
-    for (const item of planItems.filter(pi => pi.parentId)) {
-      const oldId = item.id;
-      const newParentId = planItemIdMap.get(item.parentId || "");
-      if (newParentId) {
+    // Then children level by level, so a grandchild listed before its parent is still copied
+    let pending = planItems.filter(pi => pi.parentId);
+    while (pending.length > 0) {
+      const ready = pending.filter(pi => planItemIdMap.has(pi.parentId || ""));
+      if (ready.length === 0) break;
+      for (const item of ready) {
+        const oldId = item.id;
         item.id = undefined;
         item.planId = targetPlanId;
-        item.parentId = newParentId;
+        item.parentId = planItemIdMap.get(item.parentId || "");
         item.positionId = positionIdMap.get(item.positionId || "");
         const savedItem = await this.repos.planItem.save(item);
         if (oldId) planItemIdMap.set(oldId, savedItem.id || "");
       }
+      pending = pending.filter(pi => !ready.includes(pi));
     }
 
     return planItemIdMap;
   }
 
-  private async copyPlanItemTimes(churchId: string, sourcePlanId: string, planItemIdMap: Map<string, string>, timeIdMap: Map<string, string>): Promise<void> {
+  private async copyPlanItemTimes(churchId: string, sourcePlanId: string, planItemIdMap: Map<string, string>, timeIdMap: Map<string, string>, positionIdMap: Map<string, string>): Promise<void> {
     if (planItemIdMap.size === 0 || timeIdMap.size === 0) return;
     const exclusions: PlanItemTime[] = await this.repos.planItemTime.loadByPlanId(churchId, sourcePlanId) as PlanItemTime[];
     const promises: Promise<any>[] = [];
@@ -190,7 +193,8 @@ export class PlanController extends DoingBaseController {
           churchId,
           planItemId: newPlanItemId,
           timeId: newTimeId,
-          excluded: ex.excluded
+          excluded: ex.excluded,
+          positionId: ex.positionId ? positionIdMap.get(ex.positionId) : undefined
         }));
       }
     }
@@ -258,8 +262,10 @@ export class PlanController extends DoingBaseController {
       const copyMode = req.body.copyMode || "all"; // "none" | "positions" | "all"
       const copyServiceOrder = req.body.copyServiceOrder || false;
       const oldPlan = (await this.repos.plan.load(au.churchId, id)) as Plan;
+      if (!oldPlan) return this.json({}, 404);
 
       const p = { ...req.body } as Plan;
+      delete p.id;
       delete (p as any).copyMode;
       delete (p as any).copyServiceOrder;
       p.churchId = au.churchId;
@@ -279,7 +285,7 @@ export class PlanController extends DoingBaseController {
       }
 
       if (timeIdMap.size > 0 && planItemIdMap.size > 0) {
-        await this.copyPlanItemTimes(au.churchId, id, planItemIdMap, timeIdMap);
+        await this.copyPlanItemTimes(au.churchId, id, planItemIdMap, timeIdMap, positionIdMap);
       }
 
       return plan;
@@ -293,12 +299,9 @@ export class PlanController extends DoingBaseController {
       const plans = Array.isArray(req.body) ? req.body : [req.body];
 
       for (const plan of plans) {
-        let ministryId = plan.ministryId;
-        if (!ministryId && plan.id) {
-          const existing: any = await this.repos.plan.load(au.churchId, plan.id);
-          ministryId = existing?.ministryId;
-        }
-        if (!await PlanAuth.canEditMinistry(au, ministryId)) return this.json({}, 401);
+        const existing: any = plan.id ? await this.repos.plan.load(au.churchId, plan.id) : null;
+        if (existing && !await PlanAuth.canEditMinistry(au, existing.ministryId)) return this.json({}, 401);
+        if ((plan.ministryId || !existing) && !await PlanAuth.canEditMinistry(au, plan.ministryId)) return this.json({}, 401);
       }
 
       const promises: Promise<Plan>[] = [];

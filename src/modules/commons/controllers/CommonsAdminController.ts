@@ -5,7 +5,7 @@ import { CommonsBaseController } from "./CommonsBaseController.js";
 import { Environment, Permissions } from "../../../shared/helpers/index.js";
 import { ASSET_TYPES } from "../helpers/AssetTypes.js";
 import { parseContributors } from "../helpers/ContributorsHelper.js";
-import { baseName } from "../helpers/PackageLayout.js";
+import { audioKeysToAdd, baseName, packageDirFrom } from "../helpers/PackageLayout.js";
 import { CommonsMailHelper, ContentLibraryHelper, DuplicateHelper, PublishHelper, QualityHelper, ReviewerHelper, userNames, type Reviewer } from "../helpers/index.js";
 import { SongPackageHelper } from "../helpers/SongPackageHelper.js";
 import { Repos } from "../repositories/index.js";
@@ -13,7 +13,16 @@ import { Repos } from "../repositories/index.js";
 const MAX_LISTENED_KEYS = 12;
 const KEY_RE = /^[A-G][#b]?m?$/;
 
-const REJECT_REASONS = ["quality", "duplicate", "licensing", "ccli", "offtopic", "incomplete", "other"];
+const REJECT_REASONS = [
+  "quality",
+  "duplicate",
+  "licensing",
+  "ccli",
+  "ai",
+  "offtopic",
+  "incomplete",
+  "other"
+];
 const RESOLUTIONS = ["upheld", "dismissed", "duplicate"];
 const REMOVE_REASONS = ["copyright", "policy"];
 
@@ -58,8 +67,8 @@ export class CommonsAdminController extends CommonsBaseController {
     return this.actionWrapper(req, res, async (au) => {
       if (!ReviewerHelper.canReview(au)) return this.json({}, 401);
       const product = req.query.product?.toString();
-      let rows = await this.repos.submission.loadQueue({ status: req.query.status?.toString() || "pending", assetType: req.query.assetType?.toString(), page: Number(req.query.page) || 1 });
-      if (product) rows = rows.filter((r) => ASSET_TYPES[r.assetType || ""]?.product === product);
+      const assetTypes = product ? Object.values(ASSET_TYPES).filter((t) => t.product === product).map((t) => t.key) : undefined;
+      const rows = await this.repos.submission.loadQueue({ status: req.query.status?.toString() || "pending", assetType: req.query.assetType?.toString(), assetTypes, page: Number(req.query.page) || 1 });
       const names = await userNames(rows.flatMap((r) => [r.submittedBy, r.publisherUserId]));
       // the published library, once, so a duplicate is caught even when a different writer sent the original
       const library = rows.length ? await this.repos.song.loadPublishedForDuplicates() : [];
@@ -264,8 +273,8 @@ export class CommonsAdminController extends CommonsBaseController {
       if (asset && action === "unpublish" && asset.status === "published") { await this.repos.asset.update(asset.id || "", { status: "unpublished", unpublishedAt: new Date(), removedReason: reason }); tookDown = true; }
       const note = String(req.body?.note || "").slice(0, 500);
       await this.repos.report.update(report.id || "", { status: "resolved", resolution, resolutionNote: note, reviewedBy: au.id, reviewedAt: new Date() });
-      if (asset && tookDown) void CommonsMailHelper.notifyTakedown(asset, report).catch((e) => console.error("[CommonsMailHelper] takedown failed:", e));
-      void CommonsMailHelper.notifyReportResolved({ ...report, resolutionNote: note }, resolution).catch((e) => console.error("[CommonsMailHelper] report resolved failed:", e));
+      if (asset && tookDown) await CommonsMailHelper.notifyTakedown(asset, report).catch((e) => console.error("[CommonsMailHelper] takedown failed:", e));
+      await CommonsMailHelper.notifyReportResolved({ ...report, resolutionNote: note }, resolution).catch((e) => console.error("[CommonsMailHelper] report resolved failed:", e));
       return { status: "resolved" };
     });
   }
@@ -346,7 +355,7 @@ export class CommonsAdminController extends CommonsBaseController {
       if (!song || song.status === "removed") return this.json({}, 404);
       const files = await this.repos.assetFile.loadLive(song.id || "");
       const urls = ContentLibraryHelper.fileUrls({ assetType: "song", id: song.id }, files, song.portraitKey);
-      const hasScore = !!urls.score;
+      const hasScore = !!(urls.score || urls.abc);
       const base = SongPackageHelper.baseConfidence({ hasScore, scoreSource: song.scoreSource, hasChords: !!song.hasChords });
       const published = SongPackageHelper.parseKeys(song.publishedKeys);
       const publishedKeys = published.length ? published : song.songKey ? [song.songKey] : [];
@@ -357,6 +366,30 @@ export class CommonsAdminController extends CommonsBaseController {
         : { listenedKeys: null, sundayReadyBy: null, sundayReadyAt: null, confidence: base });
       const fresh = await this.repos.song.loadById(song.id || "");
       return await SongPackageHelper.detail(fresh || song, urls, { readText: async (name) => (await ContentLibraryHelper.readKey(ContentLibraryHelper.fileKey({ assetType: "song", id: song.id }, files, name)))?.buffer.toString("utf8") ?? null });
+    });
+  }
+
+  /** Register pipeline audio already in the bucket (titled stems zip, instrumental, preview) that seed skipped. */
+  @httpPost("/sync-audio")
+  public async syncAudio(req: express.Request, res: express.Response): Promise<any> {
+    return this.actionWrapper(req, res, async (au) => {
+      if (!au.checkAccess(Permissions.server.admin)) return this.adminOnly(au);
+      const songs = await this.repos.song.loadPublishedSummaries();
+      const filesBy = await this.repos.assetFile.loadLiveMany(songs.map((s) => s.id || "").filter(Boolean));
+      let scanned = 0, added = 0;
+      for (const song of songs) {
+        const files = filesBy[song.id || ""] || [];
+        if (!files.some((f) => /\/output\/audio(\/|\.zip$)/i.test(f.name || ""))) continue;
+        const dir = packageDirFrom(files);
+        if (!dir) continue;
+        scanned++;
+        const listed = await ContentLibraryHelper.listLiveKeys(`${ContentLibraryHelper.packagePrefix(dir)}/output/audio`);
+        for (const name of audioKeysToAdd(dir, listed, files.map((f) => f.name || ""))) {
+          await this.repos.assetFile.create({ assetId: song.id, name, action: "add" });
+          added++;
+        }
+      }
+      return { scanned, added };
     });
   }
 

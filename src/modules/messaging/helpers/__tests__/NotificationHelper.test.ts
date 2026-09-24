@@ -214,7 +214,7 @@ describe("NotificationHelper.checkShouldNotify privateMessage", () => {
         loadByConversationId: jest.fn(async () => ({ ...privateMessage })),
         save: jest.fn(async (pm) => pm)
       },
-      message: { loadForConversation: jest.fn(async () => []) },
+      message: { loadLatestPerPerson: jest.fn(async () => []) },
       connection: { loadForNotification: jest.fn(async () => opts.connections ?? []) },
       notification: {
         loadNewCounts: jest.fn(async () => ({ notificationCount: 0, pmCount: 1 })),
@@ -484,6 +484,39 @@ describe("NotificationHelper.sendEmailNotifications direct messages", () => {
     expect(args[7]).toBe("sender@example.com"); // reply-to
     expect(savedComplete.at(-1)?.deliveryMethod).toBe("complete");
     expect((result as any).pmsProcessed).toBeUndefined();
+    spy.mockRestore();
+  });
+
+  it("sanitizes SES subjects and splits semicolon-separated addresses", async () => {
+    const repos = {
+      notification: {
+        loadUndelivered: jest.fn(async () => [
+          {
+            id: "N1",
+            churchId: "CHU1",
+            personId: "PER_B",
+            contentType: "task",
+            contentId: "T1",
+            message: "Please review\nthis item",
+            category: "tasks"
+          }
+        ]),
+        save: jest.fn(async (n) => n)
+      },
+      notificationPreference: { loadByPersonIds: jest.fn(async () => [{ personId: "PER_B", churchId: "CHU1", emailFrequency: "individual" }]) },
+      notificationPreferenceOverride: { loadByPersonIds: jest.fn(async () => []) },
+      deliveryLog: { save: jest.fn(async () => ({})) }
+    } as any;
+    NotificationHelper.init(repos);
+    const spy = jest.spyOn(NotificationHelper, "getEmailData").mockResolvedValue([{ id: "PER_B", email: "a@example.com; b@example.com" }] as any);
+
+    await NotificationHelper.sendEmailNotifications("individual");
+
+    expect(sendTemplatedEmailMock).toHaveBeenCalledTimes(2);
+    expect(sendTemplatedEmailMock.mock.calls[0][1]).toBe("a@example.com");
+    expect(sendTemplatedEmailMock.mock.calls[1][1]).toBe("b@example.com");
+    expect(sendTemplatedEmailMock.mock.calls[0][4]).toBe("New Notification: Please review this item");
+    expect(sendTemplatedEmailMock.mock.calls[0][4]).not.toMatch(/[\r\n]/);
     spy.mockRestore();
   });
 });

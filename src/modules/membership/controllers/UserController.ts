@@ -113,7 +113,7 @@ export class UserController extends MembershipBaseController {
             user.lastLogin = new Date();
             await this.repos.user.save(user);
             if (!isJwtRefresh) await LoginRateLimiter.clearFailures(this.repos, account);
-            MauticHelper.trackLogin(user.email).catch(() => {});
+            MauticHelper.trackLogin(user.email, req.body.appName).catch(() => {});
             const selectedChurch = userChurches[0];
             if (selectedChurch) {
               AuditLogHelper.logLogin(this.repos, selectedChurch.church.id, user.id, true, ip, { email: user.email });
@@ -256,7 +256,7 @@ export class UserController extends MembershipBaseController {
         user = { email: userEmail, firstName, lastName };
         user.registrationDate = new Date();
         user.lastLogin = user.registrationDate;
-        const tempPassword = UniqueIdHelper.shortId();
+        const tempPassword = UniqueIdHelper.secret();
         user.password = bcrypt.hashSync(tempPassword, 10);
         user = await this.repos.user.save(user);
 
@@ -287,7 +287,7 @@ export class UserController extends MembershipBaseController {
       if (user) return res.status(400).json({ errors: ["user already exists"] });
       else {
         const regStart = Date.now();
-        const tempPassword = UniqueIdHelper.shortId();
+        const tempPassword = UniqueIdHelper.secret();
         user = { email: register.email, firstName: register.firstName, lastName: register.lastName };
         minted = Environment.isMailConfigured ? null : AuthGuidHelper.mint();
         if (minted) user.authGuid = minted.stored;
@@ -340,6 +340,9 @@ export class UserController extends MembershipBaseController {
           }
           console.log("Register: link churchId", Date.now() - stepStart, "ms");
         }
+
+        // Marketing: upsert Mautic contact for leader-facing apps (fire and forget)
+        MauticHelper.registerUser(register.email, register.firstName, register.lastName, register.appName, register.churchId).catch(() => {});
 
         // Add first user to server admins group
         if (userCount === 0) {
@@ -490,6 +493,7 @@ export class UserController extends MembershipBaseController {
         user.lastName = req.body.lastName;
         user = await this.repos.user.save(user);
       }
+      if (!user) return this.json({}, 404);
       user.password = null;
       return this.json(user, 200);
     });
@@ -517,6 +521,7 @@ export class UserController extends MembershipBaseController {
         } else return this.denyAccess(["Access denied"]);
       }
 
+      if (!user) return this.json({}, 404);
       user.password = null;
       return this.json(user, 200);
     });
@@ -635,16 +640,9 @@ export class UserController extends MembershipBaseController {
       const user = await this.repos.user.loadByEmail(email);
       if (user) {
         isExistingUser = true;
-        const minted = AuthGuidHelper.mint(true);
-        user.authGuid = minted.stored;
-        loginLink = `/login?auth=${minted.raw}`;
-        await Promise.all([
-          this.repos.user.save(user),
-          UserHelper.sendInviteEmail(email, personName || "", contextName, churchName || "", loginLink, isExistingUser, inviterEmail)
-        ]);
-      } else {
-        await UserHelper.sendInviteEmail(email, personName || "", contextName, churchName || "", loginLink, isExistingUser, inviterEmail);
+        loginLink = "/login";
       }
+      await UserHelper.sendInviteEmail(email, personName || "", contextName, churchName || "", loginLink, isExistingUser, inviterEmail);
 
       return this.json({ success: true }, 200);
     });

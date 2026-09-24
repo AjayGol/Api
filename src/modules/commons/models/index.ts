@@ -18,6 +18,8 @@ export interface Song {
   licenseVersion?: string;
   /** canonical URL of that exact license — a CC BY 3.0 song must not silently read as 4.0 */
   licenseUrl?: string;
+  /** CCLI song id when the writer listed one. Not a requirement to report. */
+  ccli?: string | null;
   proAnswer?: string;
   certified?: boolean;
   qualityScore?: number;
@@ -47,7 +49,7 @@ export interface Song {
   contributors?: string | null;
 }
 
-export type Confidence = "sunday-ready" | "proofread-score" | "converted-from-abc" | "generated-from-midi" | "chart-only" | "lyrics-only";
+export type Confidence = "sunday-ready" | "score" | "generated-from-midi" | "chart-only" | "lyrics-only";
 
 export interface RightsLayer {
   license: string;
@@ -81,6 +83,7 @@ export interface Contributor {
 export interface AuthorLink {
   label?: string;
   url?: string;
+  support?: boolean;
 }
 
 export interface Author {
@@ -109,6 +112,7 @@ export interface SongView extends Song {
   portraitKey?: string;
   fileUrls?: Record<string, string>;
   downloadCount?: number;
+  saveCount?: number;
   ratingCount?: number;
   ratingSum?: number;
   createdAt?: Date;
@@ -149,6 +153,7 @@ export interface Asset {
   publishedSubmissionId?: string;
   featured?: boolean;
   downloadCount?: number;
+  saveCount?: number;
   ratingCount?: number;
   ratingSum?: number;
   removedReason?: string;

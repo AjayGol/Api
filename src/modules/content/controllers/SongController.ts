@@ -11,7 +11,8 @@ export class SongController extends ContentBaseController {
   public async search(req: express.Request<{}, {}, null>, res: express.Response): Promise<any> {
     return this.actionWrapper(req, res, async (au) => {
       const query = req.query.q as string;
-      const results = await this.repos.song.search(au.churchId, query);
+      const limit = parseInt(req.query.limit as string, 10);
+      const results = await this.repos.song.search(au.churchId, query, limit > 0 ? limit : undefined);
       return results;
     });
   }
@@ -62,7 +63,6 @@ export class SongController extends ContentBaseController {
     });
   }
 
-  // We should do batches of 10 or so.
   @httpPost("/import")
   public async import(req: express.Request<{}, {}, FreeShowSong[]>, res: express.Response): Promise<any> {
     return this.actionWrapper(req, res, async (au) => {

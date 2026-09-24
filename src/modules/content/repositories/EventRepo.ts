@@ -100,9 +100,11 @@ export class EventRepo {
   }
 
   public async loadByTag(churchId: string, tag: string): Promise<Event[]> {
+    const escaped = tag.replace(/[\\%_]/g, (c) => "\\" + c);
     return getDb().selectFrom("events").selectAll()
       .where("churchId", "=", churchId)
-      .where("tags", "like", "%" + tag + "%")
+      .where("visibility", "=", "public")
+      .where("tags", "like", "%" + escaped + "%")
       .orderBy("start").execute() as any;
   }
 
@@ -154,10 +156,14 @@ export class EventRepo {
   }
 
   public async loadTimeline(churchId: string, groupIds: string[], eventIds: string[]) {
+    const ids = groupIds || [];
+    const groupFilter = ids.length > 0
+      ? sql`groupId IN (${sql.join(ids.map(id => sql`${id}`), sql`,`)})`
+      : sql`0=1`;
     let query = sql`select *, 'event' as postType, id as postId from events
       where churchId=${churchId} AND ((
         (
-          groupId IN (${sql.join(groupIds.map(id => sql`${id}`), sql`,`)})
+          ${groupFilter}
           OR groupId IN (SELECT groupId FROM curatedEvents WHERE churchId=${churchId} AND eventId IS NULL)
           OR id IN (SELECT eventId from curatedEvents WHERE churchId=${churchId})
         )

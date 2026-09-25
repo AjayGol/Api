@@ -3,6 +3,7 @@ import { Environment } from "./dist/shared/helpers/Environment.js";
 import { createApp } from "./dist/app.js";
 import { handleSocket } from "./dist/lambda/socket-handler.js";
 import { handle30MinTimer, handleMidnightTimer, handleScheduledTasks, handleWebhookTimer } from "./dist/lambda/timer-handler.js";
+import { handleSesFeedback } from "./dist/lambda/ses-feedback-handler.js";
 
 const initializeEnvironment = async () => {
   if (!Environment.currentEnvironment) {
@@ -29,57 +30,6 @@ let cachedHandler;
 
 export const web = async function (event, context) {
   try {
-    if (event.path === "/test") {
-      return {
-        statusCode: 200,
-        headers: {
-          "Content-Type": "application/json",
-          "Access-Control-Allow-Origin": "*"
-        },
-        body: JSON.stringify({
-          message: "Lambda is working",
-          path: event.path,
-          method: event.httpMethod,
-          stage: process.env.STAGE,
-          time: new Date().toISOString()
-        })
-      };
-    }
-
-    if (event.path === "/test-post" && event.httpMethod === "POST") {
-      return {
-        statusCode: 200,
-        headers: {
-          "Content-Type": "application/json",
-          "Access-Control-Allow-Origin": "*"
-        },
-        body: JSON.stringify({
-          message: "POST request received",
-          body: event.body,
-          headers: event.headers,
-          method: event.httpMethod,
-          time: new Date().toISOString()
-        })
-      };
-    }
-
-    if (event.path === "/api/test") {
-      return {
-        statusCode: 200,
-        headers: {
-          "Content-Type": "application/json",
-          "Access-Control-Allow-Origin": "*"
-        },
-        body: JSON.stringify({
-          message: "API routing working",
-          path: event.path,
-          method: event.httpMethod,
-          modules: ["membership", "attendance", "content", "giving", "messaging", "doing"],
-          time: new Date().toISOString()
-        })
-      };
-    }
-
     await initializeEnvironment();
 
     if (!cachedHandler) {
@@ -110,8 +60,6 @@ export const web = async function (event, context) {
       },
       body: JSON.stringify({
         error: "Internal server error",
-        message: error.message,
-        stack: process.env.STAGE === "demo" ? error.stack : undefined,
         timestamp: new Date().toISOString()
       })
     };
@@ -163,6 +111,17 @@ export const timerScheduledTasks = async function (event, context) {
     return { statusCode: 200, body: "Scheduled tasks executed successfully" };
   } catch (error) {
     console.error("Error in scheduled tasks timer:", error);
+    throw error;
+  }
+};
+
+export const sesFeedback = async function (event) {
+  try {
+    await initializeEnvironment();
+    await handleSesFeedback(event);
+    return { statusCode: 200, body: "SES feedback processed" };
+  } catch (error) {
+    console.error("Error in SES feedback handler:", error);
     throw error;
   }
 };

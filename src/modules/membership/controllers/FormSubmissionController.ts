@@ -7,6 +7,7 @@ import type { FormContact } from "../helpers/index.js";
 import { MemberPermission, Person } from "../models/index.js";
 import { WebhookDispatcher } from "../../../shared/webhooks/index.js";
 import { TransactionalEmailHelper } from "../../../shared/helpers/TransactionalEmailHelper.js";
+import { ChurchEmailLimiter } from "../../../shared/helpers/ChurchEmailLimiter.js";
 import axios from "axios";
 
 @controller("/membership/formsubmissions")
@@ -210,11 +211,19 @@ export class FormSubmissionController extends MembershipBaseController {
   }
 
   private async sendFollowUp(churchId: string, email: string, firstName: string, subject: string, body: string) {
+    const reserved = await ChurchEmailLimiter.reserve(churchId, "formFollowUp", [{ address: email }]);
+    if (!reserved) return;
     const church: Church = await this.repos.church.loadById(churchId);
     const tokens = { firstName: this.escapeHtml(firstName), churchName: this.escapeHtml(church?.name) };
     const resolvedSubject = ConversationalFormHelper.applyTokens(subject, tokens);
     const resolvedBody = ConversationalFormHelper.applyTokens(body, tokens);
-    await TransactionalEmailHelper.sendTransactional(Environment.supportEmail, email, church?.name, Environment.b1AdminRoot, resolvedSubject, resolvedBody, "ChurchEmailTemplate.html");
+    try {
+      await TransactionalEmailHelper.sendTransactional(Environment.supportEmail, email, church?.name, Environment.b1AdminRoot, resolvedSubject, resolvedBody, "ChurchEmailTemplate.html");
+      await ChurchEmailLimiter.settle(churchId, reserved[0], true);
+    } catch (err: any) {
+      await ChurchEmailLimiter.settle(churchId, reserved[0], false, err?.message || "Send failed");
+      throw err;
+    }
   }
 
   private async sendNotifications(churchId: string, form: Form, peopleIds: string[]) {

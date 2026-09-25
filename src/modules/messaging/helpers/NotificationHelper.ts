@@ -9,6 +9,7 @@ import { PreferenceGateHelper } from "./PreferenceGateHelper.js";
 import axios from "axios";
 import { Environment } from "../../../shared/helpers/Environment.js";
 import { RepoManager } from "../../../shared/infrastructure/RepoManager.js";
+import { ChurchEmailLimiter } from "../../../shared/helpers/ChurchEmailLimiter.js";
 
 export interface NotificationDebugStep {
   step: string;
@@ -27,6 +28,7 @@ export interface CreateNotificationOptions {
   category?: string; // preference opt-out axis (architecture §2.6); derived if omitted
   emailByPerson?: Record<string, { subject: string; html: string }>; // pre-rendered per-recipient email; only used when emailImmediate is set
   emailImmediate?: boolean; // send the rich email at creation time instead of the escalation/batch digest
+  churchAuthored?: boolean; // emailByPerson carries church-written content, so it draws on ChurchEmailLimiter
 }
 
 export class NotificationHelper {
@@ -639,7 +641,9 @@ export class NotificationHelper {
     this.ensureInitialized();
     const category = options?.category ?? NotificationCategoryHelper.categoryFor(contentType);
     const notifications: Notification[] = [];
-    peopleIds.forEach((personId: string) => {
+    // Callers pass request-supplied ids; never notify (or email) people outside this church.
+    const inChurch = new Set(await this.peopleInChurch(churchId, peopleIds));
+    peopleIds.filter((personId) => inChurch.has(personId)).forEach((personId: string) => {
       const notification: Notification = {
         churchId,
         personId,
@@ -743,15 +747,27 @@ export class NotificationHelper {
 
     const custom = options.emailByPerson?.[notification.personId];
     const subject = custom?.subject || options.deliveryTitle || notification.message;
-    const html = custom?.html || (notification.message + (notification.link ? ` <a href="${notification.link}">View Details</a>` : ""));
+    const html = custom?.html || (NotificationHelper.escapeHtml(notification.message) + (/^https?:\/\//i.test(notification.link || "") ? ` <a href="${NotificationHelper.escapeHtml(notification.link)}">View Details</a>` : ""));
+
+    let reservationId: string | undefined;
+    if (options.churchAuthored) {
+      const reserved = await ChurchEmailLimiter.reserve(notification.churchId, "workflowEmail", [{ address: email, personId: notification.personId, contentId: notification.id }]);
+      if (!reserved) {
+        await this.logDelivery(notification.churchId, notification.personId, "notification", notification.id, "email", false, email, "Daily email limit reached");
+        return;
+      }
+      reservationId = reserved[0];
+    }
 
     try {
       await EmailHelper.sendTemplatedEmail("support@churchapps.org", email, "B1.church", "https://admin.b1.church", subject, html, "ChurchEmailTemplate.html");
-      await this.logDelivery(notification.churchId, notification.personId, "notification", notification.id, "email", true, email);
+      if (reservationId) await ChurchEmailLimiter.settle(notification.churchId, reservationId, true);
+      else await this.logDelivery(notification.churchId, notification.personId, "notification", notification.id, "email", true, email);
       notification.deliveryMethod = "complete";
       await NotificationHelper.repos.notification.save(notification);
     } catch (e) {
-      await this.logDelivery(notification.churchId, notification.personId, "notification", notification.id, "email", false, email, String(e));
+      if (reservationId) await ChurchEmailLimiter.settle(notification.churchId, reservationId, false, String(e));
+      else await this.logDelivery(notification.churchId, notification.personId, "notification", notification.id, "email", false, email, String(e));
     }
   };
 
@@ -941,6 +957,12 @@ export class NotificationHelper {
     }
   };
 
+  static peopleInChurch = async (churchId: string, peopleIds: string[]): Promise<string[]> => {
+    if (!churchId || !peopleIds.length) return [];
+    const membershipRepos = await RepoManager.getRepos<any>("membership");
+    return ((await membershipRepos.person.loadByIds(churchId, [...new Set(peopleIds)])) as any[]).map((p) => p.id);
+  };
+
   static getEmailData = async (notificationPrefs: NotificationPreference[]) => {
     const peopleIds = ArrayHelper.getIds(notificationPrefs, "personId");
     if (!peopleIds.length) return [];
@@ -973,8 +995,8 @@ export class NotificationHelper {
         const match = firstNotification.message.match(/Volunteer Requests:(.*).Please log in and confirm/);
         title = "New Notification: Volunteer Request";
         content = "<h3>New Notification</h3><h4>Volunteer Request</h4><h4>" + NotificationHelper.escapeHtml(match ? match[1] : firstNotification.message) + "</h4>" +
-          (firstNotification.link
-            ? "<a href='" + firstNotification.link + "' target='_blank'><button style='background-color: #0288d1; border:2px solid #0288d1; border-radius: 5px; color:white; cursor: pointer; padding: 5px'>View Details</button></a>"
+          (/^https?:\/\//i.test(firstNotification.link || "")
+            ? "<a href='" + NotificationHelper.escapeHtml(firstNotification.link) + "' target='_blank'><button style='background-color: #0288d1; border:2px solid #0288d1; border-radius: 5px; color:white; cursor: pointer; padding: 5px'>View Details</button></a>"
             : "") +
           "<p>Please log in and confirm</p>";
       } else {
